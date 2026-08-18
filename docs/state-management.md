@@ -97,7 +97,6 @@ Per-pane file-based state:
 | `pet_frame` | Every 200ms (animation) | Animation frame counter |
 | `pet_bob_timer` | Every 200ms (animation) | Idle bob motion timer |
 | `pet_enabled` | Once at startup | Whether the pet is drawn and ticked (from `@sidebar_pet`) |
-| `auto_close_enabled` | Once at startup | Whether the sidebar closes itself when left as the only pane in its window (from `@sidebar_auto_close`) |
 | `spinner_frame` | Every 200ms (animation) | Spinner animation frame counter |
 | `icons` | Once at startup | `StatusIcons` theme (overridable via tmux options) |
 | `tmux_pane` | Once at startup | This sidebar's own tmux pane ID |
@@ -128,7 +127,7 @@ Per-pane file-based state:
 ├─────────────────────────────────────────────────────────────┤
 │  Once at startup                                             │
 │  theme, bottom_panel_height, bottom_panel_enabled,          │
-│  pet_enabled, auto_close_enabled,                           │
+│  pet_enabled,                                               │
 │  notices.claude_plugin_*,                                   │
 │  notices.claude_settings_has_residual_hooks,                │
 │  notices.claude_plugin_notice, notices.missing_hook_groups  │
@@ -221,17 +220,52 @@ sub-tick, but only reaches the process-exit case.
 own pane each second, so `#{window_panes}`, `#{session_windows}` and
 `#{session_attached}` ride along for free. `window_panes == 1` means "nothing
 but us" (the sidebar always counts itself), and no `@pane_role` parsing is
-needed. On a hit the sidebar runs `kill-pane` on itself and `app::run` returns
-`Ok(())`; `kill-pane` rather than a bare process exit so `remain-on-exit on`
-does not leave a dead-pane husk. `after-kill-pane` is wired to the same
-SIGUSR1 wakeup as the focus hooks, so prefix + x is instant rather than up to
-1s late.
+needed. On a confirmed hit the sidebar runs `kill-pane` on itself and
+`app::run` returns `Ok(())`; `kill-pane` rather than a bare process exit so
+`remain-on-exit on` does not leave a dead-pane husk. `after-kill-pane` is
+wired to the same SIGUSR1 wakeup as the focus hooks, so prefix + x is noticed
+immediately rather than up to 1s late.
+
+**Debounce** (`app/self_close.rs`) — one sighting is not enough to act on.
+`RefreshOutcome::self_close_eligible` is an observation; `SelfCloseDebounce`
+turns it into a decision only after the condition has held for
+`SELF_CLOSE_GRACE` (250ms). Without it the SIGUSR1 wakeup makes the sidebar
+react within milliseconds, so the ordinary "kill a pane, then create a
+replacement" sequence — two separate `tmux` invocations, tens of milliseconds
+apart — gets caught mid-flight and the user loses the whole window. While a
+close is pending the event loop polls again after the grace period instead of
+waiting out the 1s tick, so confirmation costs one extra query and only in the
+rare tick where the sidebar looks alone.
 
 Both paths share `tmux::session_safe_to_close()`: tearing down the last window
 of a session destroys the session and drops every attached client, so that is
 only allowed with at most one client attached. Any query returning `None` (pane
 gone, tmux busy) reads as "cannot prove this is safe" and preserves the sidebar
 — a lingering sidebar is always better than a mass-disconnect.
+
+Note the consequence of that "at most one client" rule: in a **single-window
+session** the auto-close *does* end the session and disconnect the one attached
+client, exactly as tmux itself does when the last pane of the last window
+exits. That is intentional — the alternative is stranding a sidebar in a window
+with nothing to monitor — but it means `prefix + x` on the last agent pane can
+close the whole session, not just a pane. `@sidebar_auto_close off` opts out.
+
+**One parser for the option, read live.** `@sidebar_auto_close` is read only by
+the binary, and truthiness has exactly one definition —
+`tmux::parse_bool_option` (`on`/`true`/`1`/`yes`), shared by the global option
+map (`ui::bool_option`) and by the format expansion below.
+`agent-sidebar.conf` registers the `pane-exited` hook unconditionally and lets
+`cmd_auto_close` decide, so the config file never reimplements what counts as
+truthy — a value like `false` or `no` can't disable one half of the feature
+while leaving the other running.
+
+The sidebar's own check reads the option live rather than caching it at
+startup: `#{@sidebar_auto_close}` is appended to the same `display-message`
+that already runs each tick, so it costs nothing and toggling the option needs
+neither a config reload nor a sidebar restart. That last field is the only
+user-controlled one in the format, hence the `|` separator — an option value
+containing spaces would break a space-separated parse. An empty expansion means
+unset, which reads as the documented default (on).
 
 ---
 

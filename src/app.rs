@@ -14,6 +14,7 @@ use crate::{SPINNER_PULSE, tmux};
 
 mod input;
 mod render;
+mod self_close;
 mod setup;
 mod workers;
 
@@ -47,13 +48,19 @@ pub fn run(
     let spinner_interval = Duration::from_millis(200);
     let mut needs_redraw = true;
 
+    let mut self_close = self_close::SelfCloseDebounce::default();
+    // Normally the 1s tick, but shortened to the grace period while a
+    // self-close is awaiting confirmation so the follow-up observation
+    // lands as soon as it can decide.
+    let mut refresh_due_in = refresh_interval;
+
     loop {
         if needs_redraw {
             render::render_frame(terminal, &mut state)?;
             needs_redraw = false;
         }
 
-        let refresh_timeout = refresh_interval.saturating_sub(last_refresh.elapsed());
+        let refresh_timeout = refresh_due_in.saturating_sub(last_refresh.elapsed());
         let spinner_timeout = spinner_interval.saturating_sub(last_spinner.elapsed());
         let timeout = if needs_refresh.load(Ordering::Relaxed) {
             Duration::ZERO
@@ -85,19 +92,27 @@ pub fn run(
         }
 
         let sigusr1 = needs_refresh.swap(false, Ordering::Relaxed);
-        if sigusr1 || last_refresh.elapsed() >= refresh_interval {
+        if sigusr1 || last_refresh.elapsed() >= refresh_due_in {
             let previous_focused_pane_id = state.focus_state.focused_pane_id.clone();
             let outcome = state.refresh();
-            // The sidebar is now alone in its window. tmux only fires
+            let now = std::time::Instant::now();
+            // The sidebar looks alone in its window. tmux only fires
             // `pane-exited` when a pane's *process* exits, so every other
             // way of losing the last neighbour — `kill-pane`, `break-pane`,
             // `move-pane` — reaches no hook the plugin could bind (tmux has
             // no `after-break-pane`/`after-move-pane` at all). Noticing it
-            // on our own tick is the only path that covers them.
-            if outcome.self_close {
+            // on our own tick is the only path that covers them. One
+            // sighting is not enough though: `SelfCloseDebounce` waits for
+            // the condition to hold so a kill-then-respawn keeps its window.
+            if self_close.observe(outcome.self_close_eligible, now) {
                 let _ = tmux::run_tmux(&["kill-pane", "-t", &state.tmux_pane]);
                 return Ok(());
             }
+            refresh_due_in = if self_close.is_pending() {
+                self_close::SELF_CLOSE_GRACE
+            } else {
+                refresh_interval
+            };
             if state.bottom_panel_visible()
                 && state.focus_state.focused_pane_id != previous_focused_pane_id
             {
@@ -114,7 +129,7 @@ pub fn run(
                 window_inactive_count = window_inactive_count.saturating_add(1);
             }
             git_tab_active.store(state.git_polling_wanted(), Ordering::Relaxed);
-            last_refresh = std::time::Instant::now();
+            last_refresh = now;
         }
 
         if let Ok(data) = git_rx.try_recv() {

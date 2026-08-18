@@ -23,12 +23,12 @@ pub const BOTTOM_PANEL_HEIGHT: u16 = 20;
 pub const PET_SCENE_HEIGHT: u16 = 5;
 
 /// Read a boolean tmux option, falling back to `default` when it is unset.
-/// Accepts `on`/`off`, `true`/`false`, `1`/`0`, `yes`/`no` (case-insensitive);
-/// anything else reads as `false`.
+/// Truthiness itself is [`tmux::parse_bool_option`] — the plugin's single
+/// definition, shared with the options expanded inline into
+/// `display-message` formats.
 fn bool_option(opts: &HashMap<String, String>, key: &str, default: bool) -> bool {
     opts.get(key)
-        .map(|s| s.trim().to_ascii_lowercase())
-        .map(|s| matches!(s.as_str(), "on" | "true" | "1" | "yes"))
+        .map(|value| tmux::parse_bool_option(value))
         .unwrap_or(default)
 }
 
@@ -58,20 +58,6 @@ pub fn bottom_enabled_from_options(opts: &HashMap<String, String>) -> bool {
 pub fn bottom_enabled_from_tmux() -> bool {
     let opts = tmux::get_all_global_options();
     bottom_enabled_from_options(&opts)
-}
-
-/// Read `@sidebar_auto_close` from tmux global options, defaulting to
-/// `true` (on). When on, a sidebar left as the only pane in its window
-/// tears itself down instead of lingering in an otherwise empty window.
-/// `agent-sidebar.conf` gates the hook-driven half of the same behaviour
-/// on this option at config-load time.
-pub fn auto_close_enabled_from_options(opts: &HashMap<String, String>) -> bool {
-    bool_option(opts, tmux::SIDEBAR_AUTO_CLOSE, true)
-}
-
-pub fn auto_close_enabled_from_tmux() -> bool {
-    let opts = tmux::get_all_global_options();
-    auto_close_enabled_from_options(&opts)
 }
 
 /// Read `@sidebar_pet` from tmux global options, defaulting to `false` (off).
@@ -200,30 +186,20 @@ mod tests {
         }
     }
 
+    /// `bool_option` must delegate truthiness to `tmux::parse_bool_option`
+    /// rather than keep its own copy, so an option read from the global
+    /// map and the same option expanded into a `display-message` format
+    /// can never disagree.
     #[test]
-    fn auto_close_defaults_on_when_option_missing() {
-        let opts = HashMap::new();
-        assert!(auto_close_enabled_from_options(&opts));
-    }
-
-    #[test]
-    fn auto_close_enabled_when_truthy() {
-        for value in ["on", "ON", "true", "1", "yes", " on "] {
-            let opts = opts_with(tmux::SIDEBAR_AUTO_CLOSE, value);
-            assert!(
-                auto_close_enabled_from_options(&opts),
-                "expected {value} to enable"
-            );
-        }
-    }
-
-    #[test]
-    fn auto_close_disabled_when_falsy() {
-        for value in ["off", "OFF", "false", "0", "no", ""] {
-            let opts = opts_with(tmux::SIDEBAR_AUTO_CLOSE, value);
-            assert!(
-                !auto_close_enabled_from_options(&opts),
-                "expected {value} to disable"
+    fn bool_option_agrees_with_the_shared_truthiness_parser() {
+        for value in [
+            "on", "ON", "true", "1", "yes", " on ", "off", "OFF", "false", "0", "no", "", "bogus",
+        ] {
+            let opts = opts_with(tmux::SIDEBAR_BOTTOM, value);
+            assert_eq!(
+                bool_option(&opts, tmux::SIDEBAR_BOTTOM, true),
+                tmux::parse_bool_option(value),
+                "disagreement on {value:?}"
             );
         }
     }

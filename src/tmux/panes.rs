@@ -4,14 +4,16 @@ use super::commands::{display_message, run_tmux};
 /// session, resolved from a single `display-message` on its own pane id.
 /// Keeping it one query is the point: the sidebar re-reads this every
 /// second, so extra fields must not cost extra tmux round-trips.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// [`Default`] is the "tmux told us nothing" value: both flags `false`
+/// and every count `None`, which every close decision reads as "cannot
+/// prove this is safe".
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SidebarPaneInfo {
     /// The sidebar pane itself holds tmux focus.
     pub pane_active: bool,
     /// The sidebar's window is the active window of its session.
     pub window_active: bool,
-    pub width: u16,
-    pub height: u16,
     /// Panes in the sidebar's own window, *including* the sidebar.
     /// `None` when tmux did not answer — the pane is already gone or the
     /// server was too busy to reply.
@@ -21,22 +23,11 @@ pub struct SidebarPaneInfo {
     /// Clients attached to the sidebar's session, or `None` if tmux did
     /// not answer.
     pub session_attached: Option<u32>,
-}
-
-impl Default for SidebarPaneInfo {
-    /// The "tmux told us nothing" value. Every `Option` is `None`, which
-    /// every close decision reads as "cannot prove this is safe".
-    fn default() -> Self {
-        Self {
-            pane_active: false,
-            window_active: false,
-            width: 28,
-            height: 24,
-            window_panes: None,
-            session_windows: None,
-            session_attached: None,
-        }
-    }
+    /// `@sidebar_auto_close`, resolved live rather than cached at
+    /// startup: it rides along in the same `display-message`, so reading
+    /// it every tick is free and a user who turns it off does not have
+    /// to restart the sidebar for that to take effect.
+    pub auto_close_enabled: bool,
 }
 
 impl SidebarPaneInfo {
@@ -46,16 +37,21 @@ impl SidebarPaneInfo {
         self.window_panes == Some(1)
     }
 
-    /// The sidebar should tear itself down: it is alone in its window,
-    /// and destroying that window will not strand other tmux clients.
+    /// The sidebar should tear itself down: `@sidebar_auto_close` is on,
+    /// it is alone in its window, and destroying that window will not
+    /// strand other tmux clients.
     pub fn should_self_close(&self) -> bool {
-        self.is_alone_in_window()
+        self.auto_close_enabled
+            && self.is_alone_in_window()
             && session_safe_to_close(self.session_windows, self.session_attached)
     }
 }
 
-const SIDEBAR_PANE_INFO_FORMAT: &str = "#{pane_active} #{window_active} #{pane_width} \
-     #{pane_height} #{window_panes} #{session_windows} #{session_attached}";
+/// Pipe-separated because the last field is a user-set option value that
+/// may contain spaces; everything before it is a tmux-generated number
+/// or flag that never can.
+const SIDEBAR_PANE_INFO_FORMAT: &str = "#{pane_active}|#{window_active}|#{window_panes}\
+     |#{session_windows}|#{session_attached}|#{@sidebar_auto_close}";
 
 pub fn get_sidebar_pane_info(tmux_pane: &str) -> SidebarPaneInfo {
     parse_sidebar_pane_info(&display_message(tmux_pane, SIDEBAR_PANE_INFO_FORMAT))
@@ -66,18 +62,29 @@ pub fn get_sidebar_pane_info(tmux_pane: &str) -> SidebarPaneInfo {
 /// missing stays `None` so a half-answer can never read as "safe to
 /// close".
 fn parse_sidebar_pane_info(out: &str) -> SidebarPaneInfo {
-    let fields: Vec<&str> = out.split_whitespace().collect();
-    if fields.len() < 4 {
+    let fields: Vec<&str> = out.split('|').collect();
+    if fields.len() < 2 {
         return SidebarPaneInfo::default();
     }
+    let count = |index: usize| -> Option<u32> {
+        fields
+            .get(index)
+            .and_then(|field| field.trim().parse().ok())
+    };
     SidebarPaneInfo {
-        pane_active: fields[0] == "1",
-        window_active: fields[1] == "1",
-        width: fields[2].parse().unwrap_or(28),
-        height: fields[3].parse().unwrap_or(24),
-        window_panes: fields.get(4).and_then(|s| s.parse().ok()),
-        session_windows: fields.get(5).and_then(|s| s.parse().ok()),
-        session_attached: fields.get(6).and_then(|s| s.parse().ok()),
+        pane_active: fields[0].trim() == "1",
+        window_active: fields[1].trim() == "1",
+        window_panes: count(2),
+        session_windows: count(3),
+        session_attached: count(4),
+        // Unset (or absent, on an older sidebar's format) means on: the
+        // default, and what `agent-sidebar.conf` seeds. Only an explicit
+        // non-truthy value turns the feature off.
+        auto_close_enabled: fields
+            .get(5)
+            .map(|field| field.trim())
+            .filter(|field| !field.is_empty())
+            .is_none_or(super::options::parse_bool_option),
     }
 }
 
@@ -172,18 +179,17 @@ mod tests {
     /// Live `display-message` output captured from tmux 3.7b for a
     /// sidebar sharing its window with one other pane.
     #[test]
-    fn parse_sidebar_pane_info_reads_all_seven_fields() {
-        let info = parse_sidebar_pane_info("0 1 30 48 2 3 1");
+    fn parse_sidebar_pane_info_reads_all_six_fields() {
+        let info = parse_sidebar_pane_info("0|1|2|3|1|on");
         assert_eq!(
             info,
             SidebarPaneInfo {
                 pane_active: false,
                 window_active: true,
-                width: 30,
-                height: 48,
                 window_panes: Some(2),
                 session_windows: Some(3),
                 session_attached: Some(1),
+                auto_close_enabled: true,
             }
         );
     }
@@ -192,7 +198,7 @@ mod tests {
     fn parse_sidebar_pane_info_falls_back_when_tmux_says_nothing() {
         // `display_message` returns an empty string when the pane is
         // already gone. Every close-relevant field must stay unknown.
-        for out in ["", "   ", "1 1"] {
+        for out in ["", "   "] {
             let info = parse_sidebar_pane_info(out);
             assert_eq!(info, SidebarPaneInfo::default(), "output {out:?}");
             assert!(!info.should_self_close(), "output {out:?}");
@@ -200,21 +206,66 @@ mod tests {
     }
 
     #[test]
-    fn parse_sidebar_pane_info_keeps_geometry_when_counts_are_missing() {
-        // A truncated answer still yields usable width/height, but the
+    fn parse_sidebar_pane_info_keeps_flags_when_counts_are_missing() {
+        // A truncated answer still yields usable focus flags, but the
         // counts stay `None` so no close decision can be made from it.
-        let info = parse_sidebar_pane_info("1 1 30 48");
-        assert_eq!((info.width, info.height), (30, 48));
+        let info = parse_sidebar_pane_info("1|1");
+        assert!(info.pane_active && info.window_active);
         assert_eq!(info.window_panes, None);
         assert!(!info.should_self_close());
     }
 
     #[test]
     fn parse_sidebar_pane_info_ignores_unparseable_counts() {
-        let info = parse_sidebar_pane_info("1 1 30 48 x y z");
+        let info = parse_sidebar_pane_info("1|1|x|y|z|on");
         assert_eq!(info.window_panes, None);
         assert_eq!(info.session_windows, None);
         assert_eq!(info.session_attached, None);
+        assert!(!info.should_self_close());
+    }
+
+    #[test]
+    fn parse_sidebar_pane_info_reads_auto_close_with_the_shared_parser() {
+        for (value, expected) in [
+            ("on", true),
+            ("ON", true),
+            ("true", true),
+            ("1", true),
+            ("yes", true),
+            (" on ", true),
+            ("off", false),
+            ("OFF", false),
+            ("false", false),
+            ("0", false),
+            ("no", false),
+            ("bogus", false),
+        ] {
+            let info = parse_sidebar_pane_info(&format!("1|1|1|2|1|{value}"));
+            assert_eq!(info.auto_close_enabled, expected, "value {value:?}");
+            assert_eq!(info.should_self_close(), expected, "value {value:?}");
+        }
+    }
+
+    #[test]
+    fn parse_sidebar_pane_info_treats_an_unset_auto_close_as_on() {
+        // `@sidebar_auto_close` expands to the empty string when nobody
+        // set it — e.g. the binary run without `agent-sidebar.conf`.
+        // The documented default is on, so only an explicit non-truthy
+        // value may disable the feature.
+        for out in ["1|1|1|2|1|", "1|1|1|2|1|   ", "1|1|1|2|1"] {
+            let info = parse_sidebar_pane_info(out);
+            assert!(info.auto_close_enabled, "output {out:?}");
+            assert!(info.should_self_close(), "output {out:?}");
+        }
+    }
+
+    #[test]
+    fn parse_sidebar_pane_info_survives_a_spaced_option_value() {
+        // The option value is the only user-controlled field, hence the
+        // pipe separator: a space-separated format would mis-parse it.
+        let info = parse_sidebar_pane_info("1|1|1|2|1|not a bool");
+        assert_eq!(info.window_panes, Some(1));
+        assert!(!info.auto_close_enabled);
         assert!(!info.should_self_close());
     }
 
@@ -225,8 +276,20 @@ mod tests {
             window_panes: Some(window_panes),
             session_windows: Some(session_windows),
             session_attached: Some(session_attached),
+            auto_close_enabled: true,
             ..SidebarPaneInfo::default()
         }
+    }
+
+    #[test]
+    fn should_not_self_close_when_the_option_is_off() {
+        assert!(
+            !SidebarPaneInfo {
+                auto_close_enabled: false,
+                ..info(1, 2, 1)
+            }
+            .should_self_close()
+        );
     }
 
     #[test]

@@ -14,9 +14,13 @@ pub struct RefreshOutcome {
     /// The sidebar's window is the active window of its session. Drives
     /// the "window went inactive" backoff in the event loop.
     pub window_active: bool,
-    /// The sidebar is now the only pane left in its window and should
-    /// tear itself down. Always `false` when `@sidebar_auto_close` is off.
-    pub self_close: bool,
+    /// This tick saw the sidebar as the only pane left in its window,
+    /// with the teardown safe for the session. A single sighting, *not*
+    /// a decision — the event loop debounces it (see
+    /// `app::self_close::SelfCloseDebounce`) so a pane killed and
+    /// immediately replaced does not cost the user their window.
+    /// Always `false` when `@sidebar_auto_close` is off.
+    pub self_close_eligible: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,15 +168,15 @@ impl AppState {
     }
 
     /// Fast refresh: tmux state + activity log (called every 1s).
-    /// Returns the window-active flag plus whether the sidebar has been
-    /// left alone in its window and should close itself.
+    /// Returns the window-active flag plus this tick's observation of
+    /// whether the sidebar has been left alone in its window.
     pub fn refresh(&mut self) -> RefreshOutcome {
         self.refresh_now();
         let pane_info = tmux::get_sidebar_pane_info(&self.tmux_pane);
         let focused = pane_info.pane_active;
         let outcome = RefreshOutcome {
             window_active: pane_info.window_active,
-            self_close: self.auto_close_enabled && pane_info.should_self_close(),
+            self_close_eligible: pane_info.should_self_close(),
         };
         let (mut sessions, mut process_snapshot) = tmux::query_sessions_with_process_snapshot();
         self.sweep_dead_bg_shells_if_due(&mut sessions, &mut process_snapshot);

@@ -297,6 +297,21 @@ pub(crate) fn cmd_auto_close(args: &[String]) -> i32 {
         None => return 0,
     };
 
+    // `@sidebar_auto_close` is read here rather than gated in
+    // `agent-sidebar.conf`, so this and the sidebar's own self-close path
+    // share `tmux::parse_bool_option` and cannot disagree about what
+    // counts as "off". Resolved against `window_id` rather than globally
+    // so both paths also see the same value when the option is set at
+    // session or window scope. Unset expands to the empty string, which
+    // reads as the documented default (on). The hook only fires when a
+    // pane's process exits, so this extra read costs nothing in the
+    // steady state.
+    let auto_close =
+        tmux::display_message(window_id, &format!("#{{{}}}", tmux::SIDEBAR_AUTO_CLOSE));
+    if !auto_close.trim().is_empty() && !tmux::parse_bool_option(&auto_close) {
+        return 0;
+    }
+
     let pane_role_format = format!("#{{{}}}", tmux::PANE_ROLE);
     let list_panes_output =
         tmux::run_tmux(&["list-panes", "-t", window_id, "-F", &pane_role_format]);
@@ -512,5 +527,36 @@ mod tests {
         // pane than to destroy a live workspace.
         assert!(!should_kill_window(Some("sidebar"), None, Some(1)));
         assert!(!should_kill_window(Some("sidebar"), Some(0), Some(1)));
+    }
+
+    /// `@sidebar_auto_close` must have exactly one parser — the binary's
+    /// `ui::auto_close_enabled_from_options`. A tmux-side `if -F` gate
+    /// around the hook would be a second, subtly different one: tmux can
+    /// only cheaply test for the literal `off`, so `@sidebar_auto_close
+    /// false` would disable the sidebar's own self-close check while
+    /// leaving this hook armed, silently half-honouring the option.
+    #[test]
+    fn conf_leaves_the_auto_close_option_check_to_the_binary() {
+        const CONF: &str = include_str!("../../agent-sidebar.conf");
+
+        for line in CONF.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('#') || !trimmed.contains("@sidebar_auto_close") {
+                continue;
+            }
+            // Seeding the default is fine — it tests for *unset*, not for
+            // truthiness — but nothing else may branch on the value.
+            assert!(
+                trimmed.starts_with("if -F '#{==:#{@sidebar_auto_close},}'"),
+                "agent-sidebar.conf must not branch on @sidebar_auto_close: {trimmed}"
+            );
+        }
+
+        // Unindented, therefore not nested inside an `if -F { ... }` block.
+        assert!(
+            CONF.lines()
+                .any(|line| line.starts_with("set-hook -ga pane-exited")),
+            "the pane-exited hook must be registered unconditionally"
+        );
     }
 }

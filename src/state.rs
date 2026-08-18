@@ -141,12 +141,6 @@ pub struct AppState {
     /// Whether the pet animation is drawn and ticked. Loaded once at startup
     /// from the `@sidebar_pet` tmux option. Defaults to `false`.
     pub pet_enabled: bool,
-    /// Whether the sidebar closes itself once it is the only pane left in
-    /// its window. Loaded once at startup from the `@sidebar_auto_close`
-    /// tmux option, defaulting to `true`. Turning it off requires a
-    /// sidebar restart, matching how `agent-sidebar.conf` gates the
-    /// hook-driven half of the same behaviour at config-load time.
-    pub auto_close_enabled: bool,
 }
 
 impl AppState {
@@ -195,7 +189,6 @@ impl AppState {
             bottom_panel_enabled: true,
             sessions: SessionNamesState::new(),
             pet_enabled: false,
-            auto_close_enabled: true,
         };
         crate::state::pet::reseed_pet_idle_motion(&mut state);
         state

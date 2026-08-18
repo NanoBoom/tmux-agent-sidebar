@@ -12,12 +12,16 @@ use crate::ui;
 /// the first refresh pass.
 pub(super) fn init_state(tmux_pane: String) -> AppState {
     let mut state = AppState::new(tmux_pane);
-    state.theme = ui::colors::ColorTheme::from_tmux();
-    state.icons = ui::icons::StatusIcons::from_tmux();
-    state.bottom_panel_height = ui::bottom_panel_height_from_tmux();
-    state.bottom_panel_enabled = ui::bottom_enabled_from_tmux();
-    state.pet_enabled = ui::pet_enabled_from_tmux();
-    state.auto_close_enabled = ui::auto_close_enabled_from_tmux();
+    // One `show-options -g` for every startup-scoped option. Each of these
+    // readers has a `*_from_tmux()` twin that fetches the map itself; going
+    // through the map here keeps startup at a single tmux round-trip rather
+    // than one per option.
+    let opts = crate::tmux::get_all_global_options();
+    state.theme = ui::colors::ColorTheme::from_options(&opts);
+    state.icons = ui::icons::StatusIcons::from_options(&opts);
+    state.bottom_panel_height = ui::bottom_panel_height_from_options(&opts);
+    state.bottom_panel_enabled = ui::bottom_enabled_from_options(&opts);
+    state.pet_enabled = ui::pet_enabled_from_options(&opts);
     state.global.load_from_tmux();
     state.refresh();
 
