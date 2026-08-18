@@ -23,12 +23,12 @@ pub const BOTTOM_PANEL_HEIGHT: u16 = 20;
 pub const PET_SCENE_HEIGHT: u16 = 5;
 
 /// Read a boolean tmux option, falling back to `default` when it is unset.
-/// Accepts `on`/`off`, `true`/`false`, `1`/`0`, `yes`/`no` (case-insensitive);
-/// anything else reads as `false`.
+/// Truthiness itself is [`tmux::parse_bool_option`] — the plugin's single
+/// definition, shared with the options expanded inline into
+/// `display-message` formats.
 fn bool_option(opts: &HashMap<String, String>, key: &str, default: bool) -> bool {
     opts.get(key)
-        .map(|s| s.trim().to_ascii_lowercase())
-        .map(|s| matches!(s.as_str(), "on" | "true" | "1" | "yes"))
+        .map(|value| tmux::parse_bool_option(value))
         .unwrap_or(default)
 }
 
@@ -182,6 +182,24 @@ mod tests {
             assert!(
                 !bottom_enabled_from_options(&opts),
                 "expected {value} to disable"
+            );
+        }
+    }
+
+    /// `bool_option` must delegate truthiness to `tmux::parse_bool_option`
+    /// rather than keep its own copy, so an option read from the global
+    /// map and the same option expanded into a `display-message` format
+    /// can never disagree.
+    #[test]
+    fn bool_option_agrees_with_the_shared_truthiness_parser() {
+        for value in [
+            "on", "ON", "true", "1", "yes", " on ", "off", "OFF", "false", "0", "no", "", "bogus",
+        ] {
+            let opts = opts_with(tmux::SIDEBAR_BOTTOM, value);
+            assert_eq!(
+                bool_option(&opts, tmux::SIDEBAR_BOTTOM, true),
+                tmux::parse_bool_option(value),
+                "disagreement on {value:?}"
             );
         }
     }

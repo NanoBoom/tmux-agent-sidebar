@@ -127,6 +127,7 @@ Per-pane file-based state:
 ├─────────────────────────────────────────────────────────────┤
 │  Once at startup                                             │
 │  theme, bottom_panel_height, bottom_panel_enabled,          │
+│  pet_enabled,                                               │
 │  notices.claude_plugin_*,                                   │
 │  notices.claude_settings_has_residual_hooks,                │
 │  notices.claude_plugin_notice, notices.missing_hook_groups  │
@@ -168,7 +169,11 @@ TUI main loop (app::run in app.rs; submodules app/{setup,workers,input,render})
     → installed_plugins.json / ~/.claude/settings.json
     → initializes Claude notices state once
                         ↓
-  → refresh() every 1s
+  → refresh() every 1s → RefreshOutcome { window_active, self_close }
+    → get_sidebar_pane_info() (tmux/panes.rs) ← one `display-message` on our own
+                                       pane: focus, geometry, and the window /
+                                       session counts the self-close check needs
+    → self_close ⇒ `kill-pane` on ourselves, main loop returns (see below)
     → query_sessions() (tmux.rs)     ← reads @pane_* via `tmux list-panes -a`
     → group_panes_by_repo() (group.rs)
     → rebuild_row_targets()          ← applies GlobalState filters
@@ -182,6 +187,85 @@ TUI main loop (app::run in app.rs; submodules app/{setup,workers,input,render})
                         ↓
   → ui::draw() renders frame         ← reads all AppState fields
 ```
+
+---
+
+## Sidebar Auto-Close
+
+When the last non-sidebar pane leaves a window, the sidebar must go with it —
+otherwise it lingers alone in an empty window. Gated by `@sidebar_auto_close`
+(default on).
+
+Two mechanisms cooperate, because no single one covers every path:
+
+| Pane leaves via | `pane-exited` | Handled by |
+| --- | --- | --- |
+| shell `exit`, Ctrl-D, process killed | fires | `pane-exited` hook → `auto-close` subcommand → `kill-window` |
+| `kill-pane` (prefix + x) | **does not fire** | sidebar's own refresh tick |
+| `break-pane` | **does not fire** | sidebar's own refresh tick |
+| `move-pane` / `join-pane` out | **does not fire** | sidebar's own refresh tick |
+
+tmux only notifies `pane-exited` from `server_destroy_pane()`, the
+process-exit path — `kill-pane` goes through `server_kill_pane()` and notifies
+nothing. There is no `after-break-pane` or `after-move-pane` hook to bind at
+all (they are not valid hook names), and `window-layout-changed` also fires on
+every drag-resize, so it is unusable as a trigger. Hence the sidebar checks for
+itself.
+
+**Hook path** (`agent-sidebar.conf` → `cli/toggle.rs::cmd_auto_close`) — fast,
+sub-tick, but only reaches the process-exit case.
+
+**Self-close path** (`state/refresh.rs` → `app.rs`) — covers everything.
+`get_sidebar_pane_info()` already runs one `display-message` on the sidebar's
+own pane each second, so `#{window_panes}`, `#{session_windows}` and
+`#{session_attached}` ride along for free. `window_panes == 1` means "nothing
+but us" (the sidebar always counts itself), and no `@pane_role` parsing is
+needed. On a confirmed hit the sidebar runs `kill-pane` on itself and
+`app::run` returns `Ok(())`; `kill-pane` rather than a bare process exit so
+`remain-on-exit on` does not leave a dead-pane husk. `after-kill-pane` is
+wired to the same SIGUSR1 wakeup as the focus hooks, so prefix + x is noticed
+immediately rather than up to 1s late.
+
+**Debounce** (`app/self_close.rs`) — one sighting is not enough to act on.
+`RefreshOutcome::self_close_eligible` is an observation; `SelfCloseDebounce`
+turns it into a decision only after the condition has held for
+`SELF_CLOSE_GRACE` (250ms). Without it the SIGUSR1 wakeup makes the sidebar
+react within milliseconds, so the ordinary "kill a pane, then create a
+replacement" sequence — two separate `tmux` invocations, tens of milliseconds
+apart — gets caught mid-flight and the user loses the whole window. While a
+close is pending the event loop polls again after the grace period instead of
+waiting out the 1s tick, so confirmation costs one extra query and only in the
+rare tick where the sidebar looks alone.
+
+Both paths share `tmux::session_safe_to_close()`: tearing down the last window
+of a session destroys the session and drops every attached client, so that is
+only allowed with at most one client attached. Any query returning `None` (pane
+gone, tmux busy) reads as "cannot prove this is safe" and preserves the sidebar
+— a lingering sidebar is always better than a mass-disconnect.
+
+Note the consequence of that "at most one client" rule: in a **single-window
+session** the auto-close *does* end the session and disconnect the one attached
+client, exactly as tmux itself does when the last pane of the last window
+exits. That is intentional — the alternative is stranding a sidebar in a window
+with nothing to monitor — but it means `prefix + x` on the last agent pane can
+close the whole session, not just a pane. `@sidebar_auto_close off` opts out.
+
+**One parser for the option, read live.** `@sidebar_auto_close` is read only by
+the binary, and truthiness has exactly one definition —
+`tmux::parse_bool_option` (`on`/`true`/`1`/`yes`), shared by the global option
+map (`ui::bool_option`) and by the format expansion below.
+`agent-sidebar.conf` registers the `pane-exited` hook unconditionally and lets
+`cmd_auto_close` decide, so the config file never reimplements what counts as
+truthy — a value like `false` or `no` can't disable one half of the feature
+while leaving the other running.
+
+The sidebar's own check reads the option live rather than caching it at
+startup: `#{@sidebar_auto_close}` is appended to the same `display-message`
+that already runs each tick, so it costs nothing and toggling the option needs
+neither a config reload nor a sidebar restart. That last field is the only
+user-controlled one in the format, hence the `|` separator — an option value
+containing spaces would break a space-separated parse. An empty expansion means
+unset, which reads as the documented default (on).
 
 ---
 

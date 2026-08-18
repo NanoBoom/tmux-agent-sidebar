@@ -89,6 +89,7 @@ pub const SIDEBAR_POSITION: &str = "@sidebar_position";
 /// repository, merging panes across tmux sessions) or `session` (one
 /// group per tmux session). See `crate::group::GroupBy`.
 pub const SIDEBAR_GROUP_BY: &str = "@sidebar_group_by";
+pub const SIDEBAR_AUTO_CLOSE: &str = "@sidebar_auto_close";
 pub const SIDEBAR_FILTER: &str = "@sidebar_filter";
 pub const SIDEBAR_CURSOR: &str = "@sidebar_cursor";
 pub const SIDEBAR_REPO_FILTER: &str = "@sidebar_repo_filter";
@@ -142,6 +143,21 @@ pub fn get_option(name: &str) -> Option<String> {
     run_tmux(&["show", "-gv", name])
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+/// The plugin's one definition of a truthy tmux option value: `on`,
+/// `true`, `1` or `yes`, case-insensitively and ignoring surrounding
+/// whitespace. Anything else — including `off` and any typo — is false.
+///
+/// Every boolean `@sidebar_*` option goes through here, whether it was
+/// read from the global option map (`ui::bool_option`) or expanded
+/// inline in a `display-message` format. Two parsers for one option is
+/// how you get a value like `false` that disables half a feature.
+pub fn parse_bool_option(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "on" | "true" | "1" | "yes"
+    )
 }
 
 /// Fetch all global tmux options in a single subprocess call.
