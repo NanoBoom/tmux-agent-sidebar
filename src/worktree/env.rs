@@ -22,6 +22,10 @@ pub(crate) trait SpawnEnv {
     /// spawn (`is_free=true`, picks a fresh slug) and remove
     /// (`exists=true`, runs the cleanup).
     fn worktree_path_exists(&self, path: &str) -> bool;
+    /// Whether the worktree holds uncommitted work. The remove flow
+    /// refuses to `git worktree remove --force` a dirty worktree, so
+    /// this is the last line of defence behind the modal's own check.
+    fn worktree_is_dirty(&self, path: &str) -> bool;
     fn worktree_add(&self, repo: &str, worktree_path: &str, branch: &str) -> Result<(), String>;
     fn worktree_remove(&self, repo: &str, worktree_path: &str) -> Result<(), String>;
     fn branch_delete(&self, repo: &str, branch: &str) -> Result<(), String>;
@@ -56,6 +60,9 @@ impl SpawnEnv for RealEnv {
     }
     fn worktree_path_exists(&self, path: &str) -> bool {
         !path.is_empty() && Path::new(path).exists()
+    }
+    fn worktree_is_dirty(&self, path: &str) -> bool {
+        git::worktree_is_dirty(path)
     }
     fn worktree_add(&self, repo: &str, path: &str, branch: &str) -> Result<(), String> {
         git::worktree_add(repo, path, branch)

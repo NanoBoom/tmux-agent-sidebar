@@ -458,12 +458,18 @@ rendered output.
 - ... with a selection whose group has no `repo_root` → flash, no popup
 - nav clamps at both ends; `scroll` follows the selection past the
   visible window
-- `Enter` in `Pick` → `step == Configure`, `pick`/`field` at defaults
+- `Enter` in `Pick` → `step == Configure`, `field` at default (`pick` is
+  left alone — it only starts at `AgentPick::default()` when the modal
+  opens)
 - `Esc` in `Configure` → back to `Pick`, selection preserved
+- `Pick` → `Configure` → `Esc` → `Configure` preserves the agent/mode
+  pick as well as the row
 - `Esc` in `Pick` → `PopupState::None`
 - `open_worktree_cycle` is a no-op in `Pick`
 - `confirm_open_worktree` on an empty `rows` → error set, popup stays open
-- `open_worktree_select_row` clamps out-of-range indices
+- `open_worktree_select_row` clamps out-of-range indices, including a
+  click on the popup's bottom border (`idx == visible`, which is inside
+  the popup *area* but past the last drawn row)
 
 **`src/app/input.rs`**
 - `o` in `Focus::Panes` calls the entry point (assert on the flash, since
@@ -515,6 +521,20 @@ rendered output.
    - The remove modal's title now comes from the branch marker, not the
      worktree directory basename. They coincide for spawned worktrees
      but not for opened ones, and `[y]` must name what it deletes.
+   - **`[y]` is refused on a dirty worktree.** Naming the branch tells
+     the user *what* gets deleted but not *what is in it*, and
+     `git worktree remove --force` discards staged, unstaged and
+     untracked work with no undo. `PopupState::RemoveConfirm` carries a
+     `dirty` flag (sampled from `git status --porcelain` when the modal
+     opens); the renderer replaces `[y] remove worktree` with a muted
+     `[y] remove — blocked` under an `! uncommitted changes` warning,
+     `confirm_remove` answers `commit or stash first` instead of
+     running, and `remove_with` re-checks through
+     `SpawnEnv::worktree_is_dirty` so the guarantee does not rest on the
+     UI having refreshed. The rule is deliberately not restricted to
+     `o`-opened worktrees — losing an agent's uncommitted output from a
+     spawned worktree is the same loss. `[c]` touches no git and stays
+     available throughout.
 2. **Jump-instead-of-open** when `in_use` is true.
 3. **`open` CLI subcommand**, symmetric with `spawn`.
 4. **Async worktree listing** if `git worktree list` ever shows up as a

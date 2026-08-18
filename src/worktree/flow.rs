@@ -274,6 +274,15 @@ pub(crate) fn remove_with<E: SpawnEnv>(
             return Err("spawned branch is unset".into());
         }
         if env.worktree_path_exists(&markers.worktree_path) {
+            // `worktree_remove` runs with `--force`, which discards
+            // staged, unstaged and untracked work without asking. The
+            // modal already greys `[y]` out for a dirty worktree; this
+            // repeats the check at the flow level so the guarantee does
+            // not depend on the UI having refreshed recently, and so no
+            // future caller can route around it.
+            if env.worktree_is_dirty(&markers.worktree_path) {
+                return Err("uncommitted changes".into());
+            }
             env.worktree_remove(&markers.from_repo, &markers.worktree_path)
                 .map_err(|e| format!("git: {e}"))?;
         }
@@ -317,6 +326,10 @@ mod env_tests {
         /// branch was already dropped by a previous partial success
         /// so the remove flow should skip `git branch -D`.
         branch_already_gone: Option<bool>,
+        /// Programs `worktree_is_dirty`. Default `false` (clean tree)
+        /// so every pre-existing remove test keeps exercising the
+        /// happy path.
+        worktree_dirty: bool,
     }
 
     impl FakeEnv {
@@ -346,6 +359,9 @@ mod env_tests {
         }
         fn worktree_path_exists(&self, _path: &str) -> bool {
             !self.worktree_path_already_gone.unwrap_or(false)
+        }
+        fn worktree_is_dirty(&self, _path: &str) -> bool {
+            self.worktree_dirty
         }
         fn worktree_add(&self, repo: &str, path: &str, branch: &str) -> Result<(), String> {
             self.log(format!("worktree_add({repo},{path},{branch})"));
@@ -629,6 +645,9 @@ mod env_tests {
             fn worktree_path_exists(&self, p: &str) -> bool {
                 self.0.worktree_path_exists(p)
             }
+            fn worktree_is_dirty(&self, p: &str) -> bool {
+                self.0.worktree_is_dirty(p)
+            }
             fn worktree_add(&self, r: &str, p: &str, b: &str) -> Result<(), String> {
                 self.0.worktree_add(r, p, b)
             }
@@ -836,6 +855,63 @@ mod env_tests {
     }
 
     #[test]
+    fn remove_refuses_to_force_remove_a_dirty_worktree() {
+        // `git worktree remove --force` discards staged, unstaged and
+        // untracked work with no undo. The flow refuses rather than
+        // trusting the modal to have blocked `[y]`.
+        let env = FakeEnv {
+            worktree_dirty: true,
+            ..FakeEnv::default()
+        };
+        let err =
+            remove_with(&env, "%1", RemoveMode::WindowAndWorktree).expect_err("remove must fail");
+        assert!(err.contains("uncommitted changes"), "error: {err}");
+        let calls = env.calls();
+        assert!(
+            !has_call(&calls, "worktree_remove("),
+            "the worktree must survive: {calls:?}"
+        );
+        assert!(
+            !has_call(&calls, "branch_delete("),
+            "the branch holding that work must survive too: {calls:?}"
+        );
+        assert!(
+            !has_call(&calls, "kill_window("),
+            "the window stays as the handle for committing / retrying: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn remove_window_only_ignores_a_dirty_worktree() {
+        // `[c]` touches no git, so uncommitted work is no reason to
+        // block it.
+        let env = FakeEnv {
+            worktree_dirty: true,
+            ..FakeEnv::default()
+        };
+        remove_with(&env, "%1", RemoveMode::WindowOnly)
+            .expect("closing the window must not depend on a clean worktree");
+        let calls = env.calls();
+        assert!(has_call(&calls, "kill_window(@1)"));
+        assert!(!has_call(&calls, "worktree_remove("));
+    }
+
+    #[test]
+    fn remove_skips_the_dirty_check_when_the_worktree_is_already_gone() {
+        // A path that no longer exists cannot hold uncommitted work,
+        // and the git cleanup is skipped there anyway — the retry must
+        // still converge instead of blocking on a stale dirty flag.
+        let env = FakeEnv {
+            worktree_path_already_gone: Some(true),
+            worktree_dirty: true,
+            ..FakeEnv::default()
+        };
+        remove_with(&env, "%1", RemoveMode::WindowAndWorktree)
+            .expect("a vanished worktree must not block the close");
+        assert!(has_call(&env.calls(), "kill_window(@1)"));
+    }
+
+    #[test]
     fn remove_window_only_skips_worktree_remove() {
         let env = FakeEnv::default();
         remove_with(&env, "%1", RemoveMode::WindowOnly).expect("remove should succeed");
@@ -909,6 +985,9 @@ mod env_tests {
             }
             fn worktree_path_exists(&self, p: &str) -> bool {
                 self.0.worktree_path_exists(p)
+            }
+            fn worktree_is_dirty(&self, p: &str) -> bool {
+                self.0.worktree_is_dirty(p)
             }
             fn worktree_add(&self, r: &str, p: &str, b: &str) -> Result<(), String> {
                 self.0.worktree_add(r, p, b)

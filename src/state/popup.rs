@@ -210,6 +210,12 @@ pub enum PopupState {
     RemoveConfirm {
         pane_id: String,
         branch: String,
+        /// The worktree has staged, unstaged or untracked changes, as
+        /// of the moment the modal was opened. `[y]` runs
+        /// `git worktree remove --force`, which would discard them, so
+        /// when this is set the renderer greys the option out and
+        /// `confirm_remove` refuses it. `[c]` is unaffected.
+        dirty: bool,
         error: Option<String>,
         area: Option<ratatui::layout::Rect>,
     },
@@ -582,9 +588,16 @@ impl AppState {
             self.set_flash("remove: selected pane was not created by sidebar");
             return;
         }
+        // Sampled once, here, rather than on every frame: the modal is
+        // short-lived and `git status` is not free. The flow-level guard
+        // in `remove_with` re-checks at the moment of deletion, so a
+        // worktree that turns dirty while the modal is open is still
+        // protected.
+        let dirty = crate::git::worktree_is_dirty(&markers.worktree_path);
         self.popup = PopupState::RemoveConfirm {
             pane_id,
             branch: remove_confirm_label(&markers),
+            dirty,
             error: None,
             area: None,
         };
@@ -593,11 +606,20 @@ impl AppState {
     /// Run the remove flow on the pane stored in the confirmation popup.
     /// Success silently closes the popup; failures are surfaced inside
     /// the popup so the user can retry.
+    ///
+    /// `[y]` is refused outright on a dirty worktree — `git worktree
+    /// remove --force` would discard the uncommitted work with no undo,
+    /// and `x` → `Enter` is a two-keystroke muscle-memory path straight
+    /// out of the `o` flow. `[c]` touches no git and stays available.
     pub fn confirm_remove(&mut self, mode: crate::worktree::RemoveMode) {
-        let pane_id = match &self.popup {
-            PopupState::RemoveConfirm { pane_id, .. } => pane_id.clone(),
+        let (pane_id, dirty) = match &self.popup {
+            PopupState::RemoveConfirm { pane_id, dirty, .. } => (pane_id.clone(), *dirty),
             _ => return,
         };
+        if dirty && mode == crate::worktree::RemoveMode::WindowAndWorktree {
+            self.set_remove_error("commit or stash first");
+            return;
+        }
         match crate::worktree::remove(&pane_id, mode) {
             Ok(_) => self.popup = PopupState::None,
             Err(e) => self.set_remove_error(e),
@@ -1042,6 +1064,7 @@ mod tests {
         state.popup = PopupState::RemoveConfirm {
             pane_id: "%1".into(),
             branch: "feature/x".into(),
+            dirty: false,
             error: None,
             area: Some(ratatui::layout::Rect::new(0, 0, 20, 5)),
         };
@@ -1053,6 +1076,56 @@ mod tests {
         state.close_remove_confirm();
         assert!(!state.is_remove_confirm_open());
         assert!(state.remove_confirm_popup_area().is_none());
+    }
+
+    #[test]
+    fn confirm_remove_refuses_worktree_deletion_on_a_dirty_worktree() {
+        // `[y]` runs `git worktree remove --force`, which discards
+        // uncommitted work with no undo. The guard must fire before
+        // `worktree::remove` is reached — the popup stays open with an
+        // inline reason instead.
+        let mut state = AppState::new("%99".into());
+        state.popup = PopupState::RemoveConfirm {
+            pane_id: "%1".into(),
+            branch: "feature/x".into(),
+            dirty: true,
+            error: None,
+            area: None,
+        };
+        state.confirm_remove(crate::worktree::RemoveMode::WindowAndWorktree);
+        match &state.popup {
+            PopupState::RemoveConfirm { error, .. } => {
+                assert_eq!(error.as_deref(), Some("commit or stash first"))
+            }
+            _ => panic!("popup must stay open so the user can pick [c] instead"),
+        }
+    }
+
+    #[test]
+    fn confirm_remove_still_allows_window_only_close_on_a_dirty_worktree() {
+        // `[c]` touches no git, so uncommitted work is no reason to
+        // block it — blocking it would leave no way to close the window
+        // from the sidebar at all.
+        let mut state = AppState::new("%99".into());
+        state.popup = PopupState::RemoveConfirm {
+            pane_id: "%1".into(),
+            branch: "feature/x".into(),
+            dirty: true,
+            error: None,
+            area: None,
+        };
+        state.confirm_remove(crate::worktree::RemoveMode::WindowOnly);
+        // No tmux server in tests, so `remove` fails — but on the
+        // *flow's* error, not the dirty guard's.
+        match &state.popup {
+            PopupState::RemoveConfirm { error, .. } => assert_ne!(
+                error.as_deref(),
+                Some("commit or stash first"),
+                "the dirty guard must not apply to the window-only close"
+            ),
+            PopupState::None => {}
+            _ => panic!("unexpected popup variant"),
+        }
     }
 
     #[test]

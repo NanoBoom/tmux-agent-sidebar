@@ -72,15 +72,20 @@ including `[y]`, which runs `git worktree remove --force` and
 
 :::caution
 `[y]` on an opened worktree deletes a worktree and branch **you**
-created, not one the sidebar made. `--force` discards uncommitted
-changes, and `-D` deletes the branch even when it has not been merged.
-Use `[c]` to just close the window. Recover a deleted branch via
-`git reflog`.
+created, not one the sidebar made. `-D` deletes the branch even when it
+has not been merged. Use `[c]` to just close the window. Recover a
+deleted branch via `git reflog`.
 :::
 
-Windows opened this way also set `@agent-sidebar-opened=1`. Nothing in
-the sidebar keys off it — it exists so `tmux show-options -w` still
-tells you the git state predates the sidebar.
+Uncommitted work is protected: see
+[Uncommitted changes block `[y]`](#uncommitted-changes-block-y) below.
+
+Windows opened this way also set `@agent-sidebar-opened=1`. Only
+`remove_with` reads it, to tell a legitimately branchless detached
+checkout from a corrupt marker set — an `o`-opened worktree on a
+detached HEAD has no branch to record, while a *spawned* window without
+one can only be broken. It also means `tmux show-options -w` still tells
+you the git state predates the sidebar.
 
 Removing the *main* worktree is refused by git itself (`fatal: '…' is a
 main working tree`); the error surfaces in the modal and nothing is
@@ -95,6 +100,36 @@ Opened with `x` on a sidebar-created pane (spawned with `n` or opened with `o`),
 | `y` / `Enter`   | Close the tmux window, remove the git worktree (`--force`), **and** delete its branch (`git branch -D`) — see the caution above for `o`-opened worktrees |
 | `c`             | Close the tmux window only, keep the worktree and branch on disk                                                                       |
 | `n` / `Esc`     | Cancel                                                                                                                                 |
+
+### Uncommitted changes block `[y]`
+
+`git worktree remove --force` throws away staged, unstaged and untracked
+work without asking, and `x` → `Enter` is a two-keystroke path straight
+out of the `o` flow. So when the worktree is dirty the modal says so and
+takes the option away:
+
+```
+╭ feature/JIRA-4821 ───────╮
+│! uncommitted changes     │
+│[y] remove — blocked      │
+│[c] close window only     │
+│[n] cancel                │
+╰──────────────────────────╯
+```
+
+Pressing `y` (or `Enter`) anyway answers `commit or stash first` inside
+the modal and changes nothing. `[c]` is unaffected — it touches no git,
+so it stays the way to get the window off your screen while you decide.
+
+"Dirty" is `git status --porcelain` being non-empty, so ignored files
+(build artifacts, `node_modules`) do not count. The check runs when the
+modal opens **and** again inside the remove flow, so a worktree that a
+running agent dirties while the modal is up is still protected. A
+worktree directory that no longer exists reads as clean — there is
+nothing left to lose, and the close would otherwise be unrecoverable.
+
+This applies to spawned (`n`) and opened (`o`) worktrees alike: the
+sidebar deleting work it generated itself is no less lossy.
 
 ### Why `-D` and not `-d`?
 

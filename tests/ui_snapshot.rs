@@ -2522,6 +2522,7 @@ fn snapshot_remove_confirm_modal_shows_three_options() {
     state.popup = PopupState::RemoveConfirm {
         pane_id: "%42".into(),
         branch: "add-login".into(),
+        dirty: false,
         error: None,
         area: None,
     };
@@ -2535,6 +2536,73 @@ fn snapshot_remove_confirm_modal_shows_three_options() {
         Waiting│[y] remove worktree       │
                │[c] close window only     │
                │[n] cancel                │
+               ╰──────────────────────────╯
+    ╭ Activity │ Git ────────────────────────────────╮
+    │                 No activity yet                │
+    ╰────────────────────────────────────────────────╯
+    ");
+}
+
+#[test]
+fn snapshot_remove_confirm_modal_blocks_removal_on_a_dirty_worktree() {
+    // `[y]` runs `git worktree remove --force`. When the worktree holds
+    // uncommitted work the modal must say so *in the terminal* — the
+    // website's caution block is not something the user sees at `x`
+    // time — and the destructive row must stop looking available.
+    let pane = make_pane(AgentType::Claude, PaneStatus::Idle);
+    let mut state = make_state_for_popup_tests(vec![repo_group_with_root("proj", vec![pane])]);
+    state.popup = PopupState::RemoveConfirm {
+        pane_id: "%42".into(),
+        branch: "feature/JIRA-4821".into(),
+        dirty: true,
+        error: None,
+        area: None,
+    };
+    let output = render_to_string(&mut state, 50, 18);
+    insta::assert_snapshot!(output, @r"
+     ≡1  ●0  ◎0  ◐0  ○1  ✕0
+    ⓘ                                              — ▾
+    proj                                             +
+    ┃ ○ claude ╭ feature/JIRA-4821 ───────╮
+    ┃   main   │! uncommitted changes     │
+        Waiting│[y] remove — blocked      │
+               │[c] close window only     │
+               │[n] cancel                │
+               ╰──────────────────────────╯
+    ╭ Activity │ Git ────────────────────────────────╮
+    │                 No activity yet                │
+    ╰────────────────────────────────────────────────╯
+    ");
+}
+
+#[test]
+fn snapshot_remove_confirm_modal_dirty_refusal_shows_inline_reason() {
+    // Pressing `y` anyway must explain itself rather than doing nothing.
+    let pane = make_pane(AgentType::Claude, PaneStatus::Idle);
+    let mut state = make_state_for_popup_tests(vec![repo_group_with_root("proj", vec![pane])]);
+    state.popup = PopupState::RemoveConfirm {
+        pane_id: "%42".into(),
+        branch: "add-login".into(),
+        dirty: true,
+        error: None,
+        area: None,
+    };
+    state.confirm_remove(tmux_agent_sidebar::worktree::RemoveMode::WindowAndWorktree);
+    assert!(
+        state.is_remove_confirm_open(),
+        "the popup must stay open so [c] is still reachable"
+    );
+    let output = render_to_string(&mut state, 50, 18);
+    insta::assert_snapshot!(output, @r"
+     ≡1  ●0  ◎0  ◐0  ○1  ✕0
+    ⓘ                                              — ▾
+    proj                                             +
+    ┃ ○ claude ╭ add-login ───────────────╮
+    ┃   main   │! uncommitted changes     │
+        Waiting│[y] remove — blocked      │
+               │[c] close window only     │
+               │[n] cancel                │
+               │commit or stash first     │
                ╰──────────────────────────╯
     ╭ Activity │ Git ────────────────────────────────╮
     │                 No activity yet                │
@@ -2594,6 +2662,7 @@ fn snapshot_remove_confirm_modal_shows_inline_error() {
     state.popup = PopupState::RemoveConfirm {
         pane_id: "%42".into(),
         branch: "add-login".into(),
+        dirty: false,
         error: Some("git: worktree has uncommitted changes".into()),
         area: None,
     };
