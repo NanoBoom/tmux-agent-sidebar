@@ -88,30 +88,51 @@ impl PaneLayout {
 /// needs. Below this the popup falls back to a compact label-less
 /// layout to avoid clipping rows (the default 20-row bottom panel can
 /// leave only ~10 rows for the agents panel on short terminals).
-const SPAWN_MODAL_EXPANDED_MIN_HEIGHT: u16 = 12;
+///
+/// Sized for the modal at its TALLEST — content plus an inline error
+/// row plus borders. Budgeting only for the error-free height leaves a
+/// one-row window where the expanded layout is chosen but the popup is
+/// then clamped to the panel, and `render_at`'s bounds check silently
+/// drops the error row: the user presses Enter, nothing happens, and
+/// nothing says why.
+const SPAWN_MODAL_EXPANDED_MIN_HEIGHT: u16 =
+    EXPANDED_CONTENT_ROWS + POPUP_ERROR_ROWS + POPUP_BORDER_ROWS;
 
 /// Border rows contributed to the total popup height (top + bottom).
 const POPUP_BORDER_ROWS: u16 = 2;
 
+/// Extra row an inline error adds to the popup height.
+const POPUP_ERROR_ROWS: u16 = 1;
+
+/// Inner rows the compact layout occupies before an inline error is
+/// added. The error, when present, renders at `COMPACT_ERROR_Y`.
+const COMPACT_CONTENT_ROWS: u16 = 5;
+/// Inner rows the expanded layout occupies before an inline error.
+const EXPANDED_CONTENT_ROWS: u16 = 13;
+
 // Row offsets inside the inner area of the compact popup.
 const COMPACT_TASK_Y: u16 = 0;
-const COMPACT_AGENT_Y: u16 = 1;
-const COMPACT_MODE_Y: u16 = 2;
-const COMPACT_ERROR_Y: u16 = 3;
+const COMPACT_EDITOR_Y: u16 = 1;
+const COMPACT_AGENT_Y: u16 = 2;
+const COMPACT_MODE_Y: u16 = 3;
+const COMPACT_ERROR_Y: u16 = 4;
 
 // Row offsets inside the inner area of the expanded Vercel popup.
 // Each section is label → value with a blank spacer between them.
 const EXP_TASK_LABEL_Y: u16 = 1;
 const EXP_TASK_VALUE_Y: u16 = 2;
-const EXP_AGENT_LABEL_Y: u16 = 4;
-const EXP_AGENT_VALUE_Y: u16 = 5;
-const EXP_MODE_LABEL_Y: u16 = 7;
-const EXP_MODE_VALUE_Y: u16 = 8;
-const EXP_ERROR_Y: u16 = 10;
+const EXP_EDITOR_LABEL_Y: u16 = 4;
+const EXP_EDITOR_VALUE_Y: u16 = 5;
+const EXP_AGENT_LABEL_Y: u16 = 7;
+const EXP_AGENT_VALUE_Y: u16 = 8;
+const EXP_MODE_LABEL_Y: u16 = 10;
+const EXP_MODE_VALUE_Y: u16 = 11;
+const EXP_ERROR_Y: u16 = 13;
 
 pub(super) fn render_spawn_input_popup(frame: &mut Frame, state: &mut AppState, area: Rect) {
     let PopupState::SpawnInput {
         input,
+        editor,
         pick,
         field,
         anchor_y,
@@ -122,6 +143,7 @@ pub(super) fn render_spawn_input_popup(frame: &mut Frame, state: &mut AppState, 
         return;
     };
     let input = input.clone();
+    let editor = editor.clone();
     let field = *field;
     let anchor_y = *anchor_y;
     let error = error.clone();
@@ -131,8 +153,12 @@ pub(super) fn render_spawn_input_popup(frame: &mut Frame, state: &mut AppState, 
 
     let popup_width = area.width.min(32).max(area.width.min(14));
     let compact = area.height < SPAWN_MODAL_EXPANDED_MIN_HEIGHT;
-    let content_rows: u16 = if compact { 4 } else { 10 };
-    let error_rows: u16 = if error.is_some() { 1 } else { 0 };
+    let content_rows: u16 = if compact {
+        COMPACT_CONTENT_ROWS
+    } else {
+        EXPANDED_CONTENT_ROWS
+    };
+    let error_rows: u16 = if error.is_some() { POPUP_ERROR_ROWS } else { 0 };
     let popup_height = content_rows + error_rows + POPUP_BORDER_ROWS;
     let popup_rect = match anchor_y {
         Some(y) => anchor_below(area, y, popup_width, popup_height),
@@ -189,12 +215,20 @@ pub(super) fn render_spawn_input_popup(frame: &mut Frame, state: &mut AppState, 
     };
 
     let content_width = inner.width.saturating_sub(2) as usize;
-    let visible_input = tail_fit(&input, content_width.saturating_sub(1));
-    let mut task_spans: Vec<Span<'_>> =
-        vec![Span::styled(visible_input, value_style(SpawnField::Task))];
-    if field == SpawnField::Task {
-        task_spans.push(Span::styled("█", Style::default().fg(theme.accent)));
-    }
+    // Both text fields share the tail-fit + block-cursor treatment so a
+    // long editor command scrolls exactly like a long task name.
+    let text_spans = |value: &str, target: SpawnField| {
+        let mut spans: Vec<Span<'_>> = vec![Span::styled(
+            tail_fit(value, content_width.saturating_sub(1)),
+            value_style(target),
+        )];
+        if field == target {
+            spans.push(Span::styled("█", Style::default().fg(theme.accent)));
+        }
+        spans
+    };
+    let task_spans = text_spans(&input, SpawnField::Task);
+    let editor_spans = text_spans(&editor, SpawnField::Editor);
     let agent_value = truncate_to_width(agent, content_width);
     let mode_value = truncate_to_width(mode, content_width);
     let error_spans = error.as_ref().map(|err| {
@@ -206,6 +240,7 @@ pub(super) fn render_spawn_input_popup(frame: &mut Frame, state: &mut AppState, 
 
     if compact {
         render_at(frame, COMPACT_TASK_Y, task_spans);
+        render_at(frame, COMPACT_EDITOR_Y, editor_spans);
         render_at(
             frame,
             COMPACT_AGENT_Y,
@@ -226,6 +261,12 @@ pub(super) fn render_spawn_input_popup(frame: &mut Frame, state: &mut AppState, 
             vec![Span::styled("NAME", label_style(SpawnField::Task))],
         );
         render_at(frame, EXP_TASK_VALUE_Y, task_spans);
+        render_at(
+            frame,
+            EXP_EDITOR_LABEL_Y,
+            vec![Span::styled("EDITOR", label_style(SpawnField::Editor))],
+        );
+        render_at(frame, EXP_EDITOR_VALUE_Y, editor_spans);
         render_at(
             frame,
             EXP_AGENT_LABEL_Y,

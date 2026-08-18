@@ -195,6 +195,7 @@ impl AppState {
             selected: 0,
             scroll: 0,
             step: OpenStep::Pick,
+            editor: crate::worktree::configured_editor(),
             pick: super::AgentPick::default(),
             field: OpenField::default(),
             anchor_y,
@@ -280,7 +281,8 @@ impl AppState {
     }
 
     /// Cycle the value under the focused field. No-op in the `Pick`
-    /// step, where left/right have nothing to act on.
+    /// step, where left/right have nothing to act on, and on the editor
+    /// field, which is free text rather than a fixed list.
     pub fn open_worktree_cycle(&mut self, delta: isize) {
         let PopupState::OpenWorktree {
             step,
@@ -298,8 +300,55 @@ impl AppState {
         match *field {
             OpenField::Agent => pick.cycle_agent(delta),
             OpenField::Mode => pick.cycle_mode(delta),
+            OpenField::Editor => return,
         }
         *error = None;
+    }
+
+    /// Whether typed characters should land in the editor text field
+    /// rather than drive `j`/`k` navigation. False in the `Pick` step,
+    /// where the list must stay keyboard-navigable.
+    pub fn open_worktree_is_editing_text(&self) -> bool {
+        matches!(
+            &self.popup,
+            PopupState::OpenWorktree {
+                step: OpenStep::Configure,
+                field,
+                ..
+            } if field.is_text()
+        )
+    }
+
+    pub fn open_worktree_push_char(&mut self, c: char) {
+        if let PopupState::OpenWorktree {
+            step,
+            field,
+            editor,
+            error,
+            ..
+        } = &mut self.popup
+            && *step == OpenStep::Configure
+            && *field == OpenField::Editor
+        {
+            editor.push(c);
+            *error = None;
+        }
+    }
+
+    pub fn open_worktree_pop_char(&mut self) {
+        if let PopupState::OpenWorktree {
+            step,
+            field,
+            editor,
+            error,
+            ..
+        } = &mut self.popup
+            && *step == OpenStep::Configure
+            && *field == OpenField::Editor
+        {
+            editor.pop();
+            *error = None;
+        }
     }
 
     /// Mouse: select the row at `idx` in the picker. Out-of-range
@@ -352,6 +401,7 @@ impl AppState {
             rows,
             selected,
             step,
+            editor,
             pick,
             ..
         } = &self.popup
@@ -364,6 +414,7 @@ impl AppState {
         };
         let step = *step;
         let pick = *pick;
+        let editor = editor.trim().to_string();
         let repo_root = target_repo_root.clone();
 
         if step == OpenStep::Pick {
@@ -394,6 +445,7 @@ impl AppState {
             session,
             agent,
             mode,
+            editor,
         };
 
         match crate::worktree::open(&req) {
@@ -495,6 +547,7 @@ mod tests {
             selected: 0,
             scroll: 0,
             step: OpenStep::Pick,
+            editor: String::new(),
             pick: AgentPick::default(),
             field: OpenField::default(),
             anchor_y: None,
@@ -790,7 +843,7 @@ mod tests {
         assert!(matches!(
             state.popup,
             PopupState::OpenWorktree {
-                field: OpenField::Mode,
+                field: OpenField::Agent,
                 ..
             }
         ));
@@ -798,7 +851,7 @@ mod tests {
         assert!(matches!(
             state.popup,
             PopupState::OpenWorktree {
-                field: OpenField::Agent,
+                field: OpenField::Editor,
                 ..
             }
         ));
@@ -824,6 +877,7 @@ mod tests {
     fn open_worktree_cycle_moves_agent_then_mode_in_configure() {
         let mut state = state_with_picker(vec![row("/a", "main")]);
         state.confirm_open_worktree();
+        state.open_worktree_next_field(); // EDITOR → AGENT
         state.open_worktree_cycle(1); // agent: claude → codex
         state.open_worktree_next_field();
         state.open_worktree_cycle(1); // mode: default → auto
@@ -834,6 +888,70 @@ mod tests {
             }
             _ => panic!("popup must stay open"),
         }
+    }
+
+    // ─── Editor field ────────────────────────────────────────────────
+
+    fn popup_editor(state: &AppState) -> String {
+        match &state.popup {
+            PopupState::OpenWorktree { editor, .. } => editor.clone(),
+            _ => panic!("popup must stay open"),
+        }
+    }
+
+    #[test]
+    fn editor_field_accepts_text_only_in_the_configure_step() {
+        let mut state = state_with_picker(vec![row("/a", "main")]);
+        // Pick step: the list must stay navigable, so typing is inert.
+        assert!(!state.open_worktree_is_editing_text());
+        state.open_worktree_push_char('j');
+        assert_eq!(popup_editor(&state), "");
+
+        state.confirm_open_worktree(); // Pick → Configure
+        // Focus lands on EDITOR, the topmost field, so typing sticks.
+        assert!(state.open_worktree_is_editing_text());
+        for c in "nvim".chars() {
+            state.open_worktree_push_char(c);
+        }
+        assert_eq!(popup_editor(&state), "nvim");
+        state.open_worktree_pop_char();
+        assert_eq!(popup_editor(&state), "nvi");
+
+        // AGENT is not a text field, so typing there is inert.
+        state.open_worktree_next_field(); // EDITOR → AGENT
+        assert!(!state.open_worktree_is_editing_text());
+        state.open_worktree_push_char('j');
+        assert_eq!(popup_editor(&state), "nvi");
+    }
+
+    #[test]
+    fn cycling_the_editor_field_is_inert() {
+        // Left/right have no fixed list to walk on a free-text field.
+        let mut state = state_with_picker(vec![row("/a", "main")]);
+        state.confirm_open_worktree();
+        state.open_worktree_cycle(1);
+        state.open_worktree_cycle(-1);
+        match &state.popup {
+            PopupState::OpenWorktree { pick, editor, .. } => {
+                assert_eq!(*pick, AgentPick::default());
+                assert!(editor.is_empty());
+            }
+            _ => panic!("popup must stay open"),
+        }
+    }
+
+    #[test]
+    fn editor_text_survives_stepping_back_to_the_picker() {
+        // Same rationale as the agent/mode pick: `Esc` must not throw
+        // away what the user typed.
+        let mut state = state_with_picker(vec![row("/a", "main"), row("/b", "agent/x")]);
+        state.confirm_open_worktree();
+        for c in "hx".chars() {
+            state.open_worktree_push_char(c);
+        }
+        state.open_worktree_back(); // Configure → Pick
+        state.confirm_open_worktree(); // Pick → Configure
+        assert_eq!(popup_editor(&state), "hx");
     }
 
     // ─── Step transitions ────────────────────────────────────────────
@@ -853,7 +971,7 @@ mod tests {
             } => {
                 assert_eq!(*step, OpenStep::Configure);
                 assert_eq!(*pick, AgentPick::default());
-                assert_eq!(*field, OpenField::Agent);
+                assert_eq!(*field, OpenField::Editor);
                 assert_eq!(*selected, 1, "the picked row is preserved");
             }
             _ => panic!("popup must stay open"),
@@ -878,6 +996,7 @@ mod tests {
         // `Esc` costs the user nothing.
         let mut state = state_with_picker(vec![row("/a", "main"), row("/b", "agent/x")]);
         state.confirm_open_worktree(); // Pick → Configure
+        state.open_worktree_next_field(); // EDITOR → AGENT
         state.open_worktree_cycle(1); // agent: claude → codex
         state.open_worktree_next_field();
         state.open_worktree_cycle(1); // mode: first → second
@@ -895,7 +1014,7 @@ mod tests {
                 );
                 assert_eq!(
                     *field,
-                    OpenField::Agent,
+                    OpenField::Editor,
                     "focus still returns to the first field"
                 );
             }

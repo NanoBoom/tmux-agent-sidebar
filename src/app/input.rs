@@ -57,6 +57,17 @@ pub(super) fn handle_event(
     }
 }
 
+/// Whether a [`KeyCode::Char`] event means "the user typed this
+/// character" rather than "the user pressed a shortcut". Ctrl and Alt
+/// combinations arrive as a plain `Char` carrying a modifier, so a text
+/// field that accepts every `Char` would turn `Ctrl+A` into a literal
+/// `a` in its buffer. Shift is deliberately allowed — it is how capital
+/// letters and symbols arrive.
+fn is_typed_char(key: &KeyEvent) -> bool {
+    !key.modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+}
+
 /// Dispatch a single [`KeyEvent`]. Split out from [`handle_event`] so that
 /// unit tests can drive the keyboard path without constructing a real
 /// terminal handle (the [`Terminal`] argument is only needed for mouse
@@ -73,6 +84,7 @@ pub(super) fn handle_key_event(
         return true;
     }
     if state.is_spawn_input_open() {
+        let typed = is_typed_char(&key);
         match key.code {
             KeyCode::Esc => state.close_spawn_input(),
             KeyCode::Enter => state.confirm_spawn_input(),
@@ -81,25 +93,35 @@ pub(super) fn handle_key_event(
             KeyCode::Left => state.spawn_input_cycle(-1),
             KeyCode::Right => state.spawn_input_cycle(1),
             KeyCode::Backspace => state.spawn_input_pop_char(),
-            KeyCode::Char(c) => state.spawn_input_push_char(c),
+            KeyCode::Char(c) if typed => state.spawn_input_push_char(c),
             _ => {}
         }
         return true;
     }
     if state.is_open_worktree_open() {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let typed = is_typed_char(&key);
+        // The EDITOR field is free text and holds focus as soon as
+        // step 2 opens, so `j`/`k` have to type there rather than
+        // navigate. Every other way of moving (arrows, Tab, Ctrl-N/P)
+        // stays available in both steps, and step 1's list keeps
+        // `j`/`k` because it has no text field.
+        let editing = state.open_worktree_is_editing_text();
         match key.code {
             KeyCode::Esc => state.open_worktree_back(),
             KeyCode::Enter => state.confirm_open_worktree(),
             // `open_worktree_nav` dispatches on the current step: list
-            // movement in `Pick`, field movement in `Configure`. There
-            // is no text field in either step, so `j`/`k` are safe.
-            KeyCode::Char('j') | KeyCode::Down | KeyCode::Tab => state.open_worktree_nav(1),
+            // movement in `Pick`, field movement in `Configure`.
+            KeyCode::Down | KeyCode::Tab => state.open_worktree_nav(1),
+            KeyCode::Up | KeyCode::BackTab => state.open_worktree_nav(-1),
             KeyCode::Char('n') if ctrl => state.open_worktree_nav(1),
-            KeyCode::Char('k') | KeyCode::Up | KeyCode::BackTab => state.open_worktree_nav(-1),
             KeyCode::Char('p') if ctrl => state.open_worktree_nav(-1),
             KeyCode::Left => state.open_worktree_cycle(-1),
             KeyCode::Right => state.open_worktree_cycle(1),
+            KeyCode::Char('j') if !editing => state.open_worktree_nav(1),
+            KeyCode::Char('k') if !editing => state.open_worktree_nav(-1),
+            KeyCode::Backspace => state.open_worktree_pop_char(),
+            KeyCode::Char(c) if typed => state.open_worktree_push_char(c),
             _ => {}
         }
         return true;
@@ -404,6 +426,7 @@ mod tests {
             selected: 0,
             scroll: 0,
             step: OpenStep::Pick,
+            editor: String::new(),
             pick: AgentPick::default(),
             field: OpenField::default(),
             anchor_y: None,
@@ -467,7 +490,9 @@ mod tests {
         handle_key_event(key(KeyCode::Enter), &mut state, &flag);
         assert_eq!(state.open_worktree_step(), Some(OpenStep::Configure));
 
-        // Right cycles the focused agent field; Tab moves to MODE.
+        // Focus opens on EDITOR; Tab reaches AGENT, Right cycles it,
+        // and another Tab moves on to MODE.
+        handle_key_event(key(KeyCode::Tab), &mut state, &flag);
         handle_key_event(key(KeyCode::Right), &mut state, &flag);
         handle_key_event(key(KeyCode::Tab), &mut state, &flag);
         match &state.popup {
@@ -482,6 +507,119 @@ mod tests {
         assert_eq!(state.open_worktree_step(), Some(OpenStep::Pick));
         handle_key_event(key(KeyCode::Esc), &mut state, &flag);
         assert!(!state.is_open_worktree_open());
+    }
+
+    #[test]
+    fn j_and_k_type_into_the_open_modal_editor_field_instead_of_navigating() {
+        // `j`/`k` navigate the picker, but the EDITOR field added above
+        // AGENT is free text — while it holds focus those keys have to
+        // reach the buffer, or `nvim` could never be typed.
+        let mut state = state_with_open_picker();
+        let flag = AtomicBool::new(false);
+
+        handle_key_event(key(KeyCode::Enter), &mut state, &flag); // Pick → Configure, focus EDITOR
+        for c in "hjkl".chars() {
+            handle_key_event(key(KeyCode::Char(c)), &mut state, &flag);
+        }
+        match &state.popup {
+            PopupState::OpenWorktree { editor, field, .. } => {
+                assert_eq!(editor, "hjkl");
+                assert_eq!(
+                    *field,
+                    OpenField::Editor,
+                    "typing must not have moved the focus"
+                );
+            }
+            _ => panic!("popup must stay open"),
+        }
+
+        handle_key_event(key(KeyCode::Backspace), &mut state, &flag);
+        match &state.popup {
+            PopupState::OpenWorktree { editor, .. } => assert_eq!(editor, "hjk"),
+            _ => panic!("popup must stay open"),
+        }
+
+        // Tab still moves on, and `j` navigates again once the editor
+        // field no longer has focus.
+        handle_key_event(key(KeyCode::Tab), &mut state, &flag);
+        handle_key_event(key(KeyCode::Char('j')), &mut state, &flag);
+        match &state.popup {
+            PopupState::OpenWorktree { editor, field, .. } => {
+                assert_eq!(editor, "hjk", "the editor buffer must be untouched");
+                assert_eq!(*field, OpenField::Mode, "`j` navigated AGENT → MODE");
+            }
+            _ => panic!("popup must stay open"),
+        }
+    }
+
+    #[test]
+    fn ctrl_and_alt_chords_do_not_leak_into_the_editor_buffer() {
+        // Ctrl / Alt combinations arrive as a plain `Char` carrying a
+        // modifier. A text field that accepted every `Char` would turn
+        // `Ctrl+A` into a literal `a`, quietly corrupting the command
+        // the user is about to run.
+        let mut state = state_with_open_picker();
+        let flag = AtomicBool::new(false);
+        handle_key_event(key(KeyCode::Enter), &mut state, &flag); // Pick → Configure, focus EDITOR
+
+        for c in ['a', 'e', 'w', 'u'] {
+            handle_key_event(ctrl_key(c), &mut state, &flag);
+            handle_key_event(
+                KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT),
+                &mut state,
+                &flag,
+            );
+        }
+        match &state.popup {
+            PopupState::OpenWorktree { editor, .. } => {
+                assert_eq!(editor, "", "no chord may reach the buffer")
+            }
+            _ => panic!("popup must stay open"),
+        }
+
+        // Shift is how capital letters arrive, so it must still type.
+        handle_key_event(
+            KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT),
+            &mut state,
+            &flag,
+        );
+        match &state.popup {
+            PopupState::OpenWorktree { editor, .. } => assert_eq!(editor, "N"),
+            _ => panic!("popup must stay open"),
+        }
+    }
+
+    #[test]
+    fn ctrl_chords_do_not_leak_into_the_spawn_modal_name_field() {
+        let mut state = AppState::new("%99".into());
+        state.open_spawn_input_for_repo("proj".into(), "/tmp/proj".into(), None);
+        let flag = AtomicBool::new(false);
+
+        for c in ['a', 'e', 'w'] {
+            handle_key_event(ctrl_key(c), &mut state, &flag);
+        }
+        match &state.popup {
+            PopupState::SpawnInput { input, .. } => {
+                assert_eq!(input, "", "no chord may reach the task name")
+            }
+            _ => panic!("popup must stay open"),
+        }
+
+        handle_key_event(key(KeyCode::Char('x')), &mut state, &flag);
+        match &state.popup {
+            PopupState::SpawnInput { input, .. } => assert_eq!(input, "x"),
+            _ => panic!("popup must stay open"),
+        }
+    }
+
+    #[test]
+    fn j_still_navigates_the_open_picker_list() {
+        // Regression guard for the `editing` branch: the Pick step has
+        // no text field, so `j` must keep moving the selection.
+        let mut state = state_with_open_picker();
+        let flag = AtomicBool::new(false);
+        handle_key_event(key(KeyCode::Char('j')), &mut state, &flag);
+        assert_eq!(state.open_worktree_selected(), 1);
     }
 
     #[test]

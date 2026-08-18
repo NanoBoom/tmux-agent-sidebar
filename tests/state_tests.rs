@@ -916,8 +916,9 @@ fn spawn_input_pop_char_removes_trailing_char_only_on_input_field() {
         _ => panic!(),
     }
 
-    // On a non-input field, pop is a no-op.
-    state.spawn_input_next_field();
+    // On a non-text field, pop leaves the task name alone.
+    state.spawn_input_next_field(); // editor
+    state.spawn_input_next_field(); // agent
     state.spawn_input_pop_char();
     match &state.popup {
         PopupState::SpawnInput { input, .. } => assert_eq!(input, "ab"),
@@ -928,8 +929,9 @@ fn spawn_input_pop_char_removes_trailing_char_only_on_input_field() {
 #[test]
 fn spawn_input_field_wraps_forward_and_backward() {
     let mut state = spawn_state_with_repo();
-    state.spawn_input_next_field();
-    state.spawn_input_next_field();
+    state.spawn_input_next_field(); // Editor
+    state.spawn_input_next_field(); // Agent
+    state.spawn_input_next_field(); // Mode
     state.spawn_input_next_field(); // wraps back to Task
     match &state.popup {
         PopupState::SpawnInput { field, .. } => {
@@ -949,7 +951,8 @@ fn spawn_input_field_wraps_forward_and_backward() {
 #[test]
 fn spawn_input_cycle_changes_agent_and_resets_mode() {
     let mut state = spawn_state_with_repo();
-    state.spawn_input_next_field(); // field = 1 (agent)
+    state.spawn_input_next_field(); // editor
+    state.spawn_input_next_field(); // agent
     // Cycle agent forward — expect agent_idx to advance.
     state.spawn_input_cycle(1);
     match &state.popup {
@@ -970,6 +973,7 @@ fn spawn_input_cycle_changes_agent_and_resets_mode() {
 #[test]
 fn spawn_input_cycle_on_mode_field_increments_mode_only() {
     let mut state = spawn_state_with_repo();
+    state.spawn_input_next_field(); // editor
     state.spawn_input_next_field(); // agent
     state.spawn_input_next_field(); // mode
     state.spawn_input_cycle(1);
@@ -1025,15 +1029,16 @@ fn agent_cycle_keeps_mode_in_bounds_for_codex() {
     // Codex has only 3 modes; cycling to codex with a high mode_idx
     // should be safe because agent switch resets mode_idx to 0.
     let mut state = spawn_state_with_repo();
-    state.spawn_input_next_field(); // mode moved away from 0? no, field=1 (agent)
+    state.spawn_input_next_field(); // editor
+    state.spawn_input_next_field(); // agent
     // First cycle past the claude mode list (5 entries) to exercise
     // wrapping, then jump to codex.
-    state.spawn_input_next_field(); // field = 2 (mode)
+    state.spawn_input_next_field(); // mode
     for _ in 0..worktree::CLAUDE_MODES.len() {
         state.spawn_input_cycle(1);
     }
     // Now go back to agent field and pick codex.
-    state.spawn_input_prev_field(); // field = 1
+    state.spawn_input_prev_field(); // agent
     state.spawn_input_cycle(1); // agent → codex
     match &state.popup {
         PopupState::SpawnInput { pick, .. } => {

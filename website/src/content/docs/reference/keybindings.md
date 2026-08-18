@@ -52,8 +52,8 @@ Opened with `n` on a repo.
 
 | Key                                | Action                                                                                           |
 | ---------------------------------- | ------------------------------------------------------------------------------------------------ |
-| Text keys                          | Type the name (used as the branch slug and tmux window name)                                     |
-| `↑` / `↓` / `Tab` / `Shift+Tab`    | Move focus between `NAME` / `AGENT` / `MODE` fields                                              |
+| Text keys                          | Type into the focused text field (`NAME` or `EDITOR`)                                            |
+| `↑` / `↓` / `Tab` / `Shift+Tab`    | Move focus between `NAME` / `EDITOR` / `AGENT` / `MODE` fields                                   |
 | `←` / `→`                          | Cycle the value when the agent or mode field has focus                                           |
 | `Enter`                            | Create the worktree + window and launch the agent                                                |
 | `Esc`                              | Cancel                                                                                           |
@@ -78,14 +78,18 @@ worktree. It is informational: `Enter` still opens a new window.
 | `Enter`                             | Confirm and go to step 2        |
 | `Esc`                               | Close the modal                 |
 
-### Step 2 — pick the agent and mode
+### Step 2 — pick the editor, agent and mode
 
-`BRANCH` is read-only — it shows what you picked in step 1.
+`BRANCH` is read-only — it shows what you picked in step 1. Focus starts
+on `EDITOR`, so `j` / `k` type rather than navigate here; use `Tab`, the
+arrows or `Ctrl+n` / `Ctrl+p` to move focus. Step 1's list still takes
+`j` / `k`.
 
 | Key                              | Action                                        |
 | -------------------------------- | --------------------------------------------- |
-| `↑` / `↓` / `Tab` / `Shift+Tab`  | Move focus between `AGENT` / `MODE`           |
-| `←` / `→`                        | Cycle the focused value                       |
+| `↑` / `↓` / `Tab` / `Shift+Tab`  | Move focus between `EDITOR` / `AGENT` / `MODE`|
+| `←` / `→`                        | Cycle the focused value (agent and mode only) |
+| Text keys                        | Edit the command when `EDITOR` has focus      |
 | `Enter`                          | Open a window in the worktree and launch      |
 | `Esc`                            | Back to step 1                                |
 

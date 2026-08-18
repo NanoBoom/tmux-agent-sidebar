@@ -30,6 +30,7 @@ Most options must be set **before** loading the plugin in your `tmux.conf`. Colo
 | `@agent-sidebar-default-agent`    | `claude`    | Agent launched by `n`&nbsp;(also accepts `codex`)         |
 | `@agent-sidebar-branch-prefix`    | `agent/`    | Branch prefix for new worktrees                           |
 | `@agent-sidebar-worktree-dir`     | `.worktrees` | Repo-relative directory for sidebar-spawned worktrees; absolute paths and `..` are rejected |
+| `@sidebar_editor`                 | unset       | Editor command pre-filled into the EDITOR field of the `n` and `o` modals, e.g. `nvim`. When it ends up non-empty the new window is split — editor on the left, agent on the right. Leave it unset to keep a single agent pane |
 
 ## Status and filter colors
 

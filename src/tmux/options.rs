@@ -98,6 +98,12 @@ pub const SIDEBAR_BOTTOM_HEIGHT: &str = "@sidebar_bottom_height";
 pub const SIDEBAR_PET: &str = "@sidebar_pet";
 pub const SIDEBAR_NOTIFICATIONS: &str = "@sidebar_notifications";
 pub const SIDEBAR_NOTIFICATIONS_EVENTS: &str = "@sidebar_notifications_events";
+/// Editor command pre-filled into the EDITOR field of the spawn (`n`)
+/// and open (`o`) worktree modals, e.g. `nvim`. Empty — the default —
+/// keeps the pre-existing single-pane behaviour; any other value makes
+/// the flow split the new window and run the editor on the left with
+/// the agent on the right.
+pub const SIDEBAR_EDITOR: &str = "@sidebar_editor";
 
 pub const SIDEBAR_COLOR_ACCENT: &str = "@sidebar_color_accent";
 pub const SIDEBAR_COLOR_BORDER: &str = "@sidebar_color_border";

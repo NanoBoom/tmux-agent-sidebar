@@ -36,12 +36,20 @@ pub fn cmd_spawn(args: &[String]) -> i32 {
         .cloned()
         .unwrap_or_else(|| worktree::DEFAULT_AGENT.into());
 
+    // Same `@sidebar_editor` contract as the `n` modal, read from the
+    // options map already in hand.
+    let editor = opts
+        .get(tmux::SIDEBAR_EDITOR)
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+
     let req = SpawnRequest {
         repo_root: PathBuf::from(repo_root),
         task_name: args.join(" "),
         session,
         agent,
         mode: worktree::DEFAULT_MODE.into(),
+        editor,
     };
     match worktree::spawn(&req) {
         Ok(branch) => {

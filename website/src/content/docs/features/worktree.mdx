@@ -19,7 +19,7 @@ Opened with `n` or by clicking the `+` button next to a repo header.
 | Key                                | Action                                                                                           |
 | ---------------------------------- | ------------------------------------------------------------------------------------------------ |
 | Text keys                          | Type the name. The slugified form (`add login form` → `add-login-form`) becomes both the tmux window name and the branch suffix (branch: `agent/add-login-form`). See "What gets created" below. |
-| `↑` / `↓` / `Tab` / `Shift+Tab`    | Move focus between `NAME` / `AGENT` / `MODE` fields                                              |
+| `↑` / `↓` / `Tab` / `Shift+Tab`    | Move focus between `NAME` / `EDITOR` / `AGENT` / `MODE` fields                                   |
 | `←` / `→`                          | Cycle the value when the agent or mode field has focus                                           |
 | `Enter`                            | Create the worktree + window and launch the agent                                                |
 | `Esc` / click outside              | Cancel                                                                                           |
@@ -32,7 +32,37 @@ The modal's `NAME` field is slugified (lowercase, non-alphanumeric → `-`) and 
 - **Worktree path** — `<repo>/.worktrees/<slug>` by default. Change the repo-relative directory with `@agent-sidebar-worktree-dir`; absolute paths and `..` are rejected.
 - **tmux window** — the slug is used as the window name; the agent you picked in the modal (`claude` / `codex` / `opencode`) launches inside it with the selected permission `MODE`.
 
-Defaults for the agent, branch prefix, and worktree directory live in tmux options — see [tmux options](/tmux-agent-sidebar/reference/tmux-options/) for the full list.
+Defaults for the agent, branch prefix, worktree directory, and editor live in tmux options — see [tmux options](/tmux-agent-sidebar/reference/tmux-options/) for the full list.
+
+### Editor pane
+
+The `EDITOR` field, directly above `AGENT`, is free text pre-filled from
+`@sidebar_editor`:
+
+```tmux
+set -g @sidebar_editor 'nvim'
+```
+
+Leave it empty (the default) and the new window keeps a single pane
+running the agent, exactly as before. Fill it in — in the config or just
+for this one spawn — and the window is split instead:
+
+```
+┌───────────────┬───────────────┐
+│               │               │
+│    nvim       │    claude     │
+│   (editor)    │    (agent)    │
+│               │               │
+└───────────────┴───────────────┘
+```
+
+The value is sent to the left pane's shell verbatim, so flags and
+arguments work (`nvim -c 'NvimTreeOpen' .`). Both panes start in the
+worktree directory, and the sidebar's markers are set at window scope
+before the split, so `x` still closes the whole thing from either side.
+
+If the split fails, the entire spawn is rolled back — a window holding
+an editor but no agent is worse than no window at all.
 
 ## Open worktree modal
 
@@ -56,12 +86,18 @@ It is informational only — `Enter` still opens a new window.
 
 | Key                              | Action                                             |
 | -------------------------------- | -------------------------------------------------- |
-| `↑` / `↓` / `Tab` / `Shift+Tab`  | Move focus between `AGENT` / `MODE`                |
-| `←` / `→`                        | Cycle the focused value                            |
+| `↑` / `↓` / `Tab` / `Shift+Tab`  | Move focus between `EDITOR` / `AGENT` / `MODE`     |
+| `←` / `→`                        | Cycle the focused value (agent and mode only)      |
+| Text keys                        | Edit the command when `EDITOR` has focus           |
 | `Enter`                          | Open the window in that worktree and launch        |
 | `Esc`                            | Back to step 1                                     |
 
-`BRANCH` is read-only — it echoes what you picked in step 1.
+`BRANCH` is read-only — it echoes what you picked in step 1. `EDITOR`
+works exactly as in the spawn modal above, including the split-pane
+layout, and takes focus as soon as step 2 opens. That means `j` / `k`
+type here instead of navigating; use `Tab`, the arrows or `Ctrl+n` /
+`Ctrl+p` to move focus. Step 1's list is unaffected — it has no text
+field, so `j` / `k` still move the selection there.
 
 ### Closing it again
 

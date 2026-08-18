@@ -434,6 +434,7 @@ fn snapshot_open_worktree_picker_selection_styled() {
         selected: 0,
         scroll: 0,
         step: OpenStep::Pick,
+        editor: String::new(),
         pick: AgentPick::default(),
         field: OpenField::default(),
         anchor_y: None,

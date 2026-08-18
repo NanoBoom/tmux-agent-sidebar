@@ -73,22 +73,31 @@ impl AgentPick {
 }
 
 /// Focus target inside the spawn input popup. Tab / Shift+Tab / arrow
-/// keys cycle through these in order; only `Task` accepts text input.
+/// keys cycle through these in order; `Task` and `Editor` accept text
+/// input, `Agent` and `Mode` cycle a fixed list with left/right.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SpawnField {
     #[default]
     Task,
+    Editor,
     Agent,
     Mode,
 }
 
-/// Focus target inside the open-worktree modal's second step. There is
-/// no text input there, so this is deliberately not [`SpawnField`] —
-/// reusing that enum would make the unreachable `Task` variant
-/// representable.
+/// Focus target inside the open-worktree modal's second step. Kept
+/// separate from [`SpawnField`] because there is no editable NAME there
+/// — the branch comes from step 1 — so reusing that enum would make the
+/// unreachable `Task` variant representable.
+///
+/// The default is `Editor`, the topmost field, so focus starts where
+/// the eye does and matches the spawn modal (which also opens on its
+/// first field). The cost is that `j`/`k` type instead of navigating as
+/// soon as step 2 opens; Tab, the arrows and Ctrl-N/P still move focus,
+/// and step 1's list keeps `j`/`k` because it has no text field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OpenField {
     #[default]
+    Editor,
     Agent,
     Mode,
 }
@@ -96,15 +105,24 @@ pub enum OpenField {
 impl OpenField {
     pub fn next(self) -> Self {
         match self {
+            Self::Editor => Self::Agent,
             Self::Agent => Self::Mode,
-            Self::Mode => Self::Agent,
+            Self::Mode => Self::Editor,
         }
     }
 
     pub fn prev(self) -> Self {
-        // Two variants, so prev and next coincide; spelled out
-        // separately to keep the call sites symmetric with SpawnField.
-        self.next()
+        match self {
+            Self::Editor => Self::Mode,
+            Self::Agent => Self::Editor,
+            Self::Mode => Self::Agent,
+        }
+    }
+
+    /// Whether the field consumes typed characters. Drives the key
+    /// table's decision to treat `j`/`k` as text rather than navigation.
+    pub fn is_text(self) -> bool {
+        matches!(self, Self::Editor)
     }
 }
 
@@ -135,7 +153,8 @@ pub struct OpenWorktreeRow {
 impl SpawnField {
     pub fn next(self) -> Self {
         match self {
-            Self::Task => Self::Agent,
+            Self::Task => Self::Editor,
+            Self::Editor => Self::Agent,
             Self::Agent => Self::Mode,
             Self::Mode => Self::Task,
         }
@@ -144,7 +163,8 @@ impl SpawnField {
     pub fn prev(self) -> Self {
         match self {
             Self::Task => Self::Mode,
-            Self::Agent => Self::Task,
+            Self::Editor => Self::Task,
+            Self::Agent => Self::Editor,
             Self::Mode => Self::Agent,
         }
     }
@@ -191,6 +211,9 @@ pub enum PopupState {
         input: String,
         target_repo: String,
         target_repo_root: String,
+        /// Command for the editor pane, seeded from `@sidebar_editor`.
+        /// Empty means the new window keeps a single agent pane.
+        editor: String,
         pick: AgentPick,
         field: SpawnField,
         /// Screen Y of the repo header row that owns the `+` button
@@ -231,6 +254,8 @@ pub enum PopupState {
         /// popup's inner height.
         scroll: usize,
         step: OpenStep,
+        /// Same contract as [`PopupState::SpawnInput`]'s `editor`.
+        editor: String,
         pick: AgentPick,
         field: OpenField,
         /// Screen Y of the repo header row this modal was opened from,
@@ -386,6 +411,7 @@ impl AppState {
             input: String::new(),
             target_repo: repo_name,
             target_repo_root: repo_root,
+            editor: crate::worktree::configured_editor(),
             pick: AgentPick::default(),
             field: SpawnField::Task,
             anchor_y,
@@ -449,7 +475,7 @@ impl AppState {
     }
 
     /// Cycle the value under the focused agent or mode field. No-op on
-    /// the task input field so typing isn't interfered with.
+    /// the task and editor input fields so typing isn't interfered with.
     pub fn spawn_input_cycle(&mut self, delta: isize) {
         let PopupState::SpawnInput {
             field, pick, error, ..
@@ -466,20 +492,24 @@ impl AppState {
                 pick.cycle_mode(delta);
                 *error = None;
             }
-            SpawnField::Task => {}
+            SpawnField::Task | SpawnField::Editor => {}
         }
     }
 
     pub fn spawn_input_push_char(&mut self, c: char) {
         if let PopupState::SpawnInput {
             input,
+            editor,
             field,
             error,
             ..
         } = &mut self.popup
-            && *field == SpawnField::Task
         {
-            input.push(c);
+            match *field {
+                SpawnField::Task => input.push(c),
+                SpawnField::Editor => editor.push(c),
+                _ => return,
+            }
             *error = None;
         }
     }
@@ -487,13 +517,17 @@ impl AppState {
     pub fn spawn_input_pop_char(&mut self) {
         if let PopupState::SpawnInput {
             input,
+            editor,
             field,
             error,
             ..
         } = &mut self.popup
-            && *field == SpawnField::Task
         {
-            input.pop();
+            match *field {
+                SpawnField::Task => input.pop(),
+                SpawnField::Editor => editor.pop(),
+                _ => return,
+            };
             *error = None;
         }
     }
@@ -519,6 +553,7 @@ impl AppState {
         let PopupState::SpawnInput {
             input,
             target_repo_root,
+            editor,
             pick,
             ..
         } = &self.popup
@@ -532,6 +567,7 @@ impl AppState {
         }
         let agent = pick.agent_or_default();
         let mode = pick.mode_or_default(&agent);
+        let editor = editor.trim().to_string();
         let repo_root = std::path::PathBuf::from(target_repo_root.clone());
 
         let Some(session) = crate::tmux::pane_session_name(&self.tmux_pane) else {
@@ -545,6 +581,7 @@ impl AppState {
             session,
             agent,
             mode,
+            editor,
         };
         match crate::worktree::spawn(&req) {
             Ok(_) => self.popup = PopupState::None,
@@ -662,11 +699,14 @@ mod tests {
 
     #[test]
     fn spawn_field_next_and_prev_cycle() {
-        assert_eq!(SpawnField::Task.next(), SpawnField::Agent);
+        // Tab order follows the rendered order: NAME, EDITOR, AGENT, MODE.
+        assert_eq!(SpawnField::Task.next(), SpawnField::Editor);
+        assert_eq!(SpawnField::Editor.next(), SpawnField::Agent);
         assert_eq!(SpawnField::Agent.next(), SpawnField::Mode);
         assert_eq!(SpawnField::Mode.next(), SpawnField::Task);
         assert_eq!(SpawnField::Task.prev(), SpawnField::Mode);
-        assert_eq!(SpawnField::Agent.prev(), SpawnField::Task);
+        assert_eq!(SpawnField::Editor.prev(), SpawnField::Task);
+        assert_eq!(SpawnField::Agent.prev(), SpawnField::Editor);
         assert_eq!(SpawnField::Mode.prev(), SpawnField::Agent);
     }
 
@@ -674,11 +714,22 @@ mod tests {
 
     #[test]
     fn open_field_next_and_prev_cycle() {
-        assert_eq!(OpenField::default(), OpenField::Agent);
+        // Focus starts on the topmost field, matching the rendered
+        // order and the spawn modal.
+        assert_eq!(OpenField::default(), OpenField::Editor);
+        assert_eq!(OpenField::Editor.next(), OpenField::Agent);
         assert_eq!(OpenField::Agent.next(), OpenField::Mode);
-        assert_eq!(OpenField::Mode.next(), OpenField::Agent);
-        assert_eq!(OpenField::Agent.prev(), OpenField::Mode);
+        assert_eq!(OpenField::Mode.next(), OpenField::Editor);
+        assert_eq!(OpenField::Editor.prev(), OpenField::Mode);
+        assert_eq!(OpenField::Agent.prev(), OpenField::Editor);
         assert_eq!(OpenField::Mode.prev(), OpenField::Agent);
+    }
+
+    #[test]
+    fn only_the_editor_field_consumes_typed_characters() {
+        assert!(OpenField::Editor.is_text());
+        assert!(!OpenField::Agent.is_text());
+        assert!(!OpenField::Mode.is_text());
     }
 
     // ─── AgentPick ───────────────────────────────────────────────────
@@ -925,6 +976,7 @@ mod tests {
             input,
             target_repo,
             target_repo_root,
+            editor,
             pick,
             field,
             anchor_y,
@@ -935,6 +987,9 @@ mod tests {
             assert!(input.is_empty());
             assert_eq!(target_repo, "alpha");
             assert_eq!(target_repo_root, "/tmp/alpha");
+            // No tmux server under test, so `@sidebar_editor` reads as
+            // unset — the documented default.
+            assert!(editor.is_empty());
             assert_eq!(*pick, AgentPick::default());
             assert_eq!(*field, SpawnField::Task);
             assert_eq!(*anchor_y, Some(7));
@@ -958,6 +1013,14 @@ mod tests {
     fn spawn_input_next_prev_cycle_field() {
         let mut state = AppState::new("%99".into());
         state.open_spawn_input_for_repo("alpha".into(), "/tmp/alpha".into(), None);
+        state.spawn_input_next_field();
+        assert!(matches!(
+            state.popup,
+            PopupState::SpawnInput {
+                field: SpawnField::Editor,
+                ..
+            }
+        ));
         state.spawn_input_next_field();
         assert!(matches!(
             state.popup,

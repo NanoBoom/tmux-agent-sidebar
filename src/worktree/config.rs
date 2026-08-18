@@ -18,6 +18,21 @@ pub const CLAUDE_MODES: &[&str] = &[
 pub const CODEX_MODES: &[&str] = &["default", "auto", "bypassPermissions"];
 pub const OPENCODE_MODES: &[&str] = &["default"];
 
+/// Editor command the spawn / open modals pre-fill their EDITOR field
+/// with, read from `@sidebar_editor` ([`crate::tmux::SIDEBAR_EDITOR`]).
+/// Empty — the default — means "no editor pane", which keeps the
+/// pre-existing single-pane window.
+///
+/// Read once when a modal opens rather than at launch time so the value
+/// the user sees in the field is exactly the one that will run, even
+/// after they edit it.
+pub fn configured_editor() -> String {
+    crate::tmux::get_all_global_options()
+        .get(crate::tmux::SIDEBAR_EDITOR)
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
+}
+
 pub fn modes_for(agent: &str) -> &'static [&'static str] {
     match agent {
         "codex" => CODEX_MODES,

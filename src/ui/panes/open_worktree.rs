@@ -12,10 +12,11 @@ use ratatui::{
 };
 
 use super::{
-    COMPACT_AGENT_Y, COMPACT_ERROR_Y, COMPACT_MODE_Y, COMPACT_TASK_Y, EXP_AGENT_LABEL_Y,
-    EXP_AGENT_VALUE_Y, EXP_ERROR_Y, EXP_MODE_LABEL_Y, EXP_MODE_VALUE_Y, EXP_TASK_LABEL_Y,
-    EXP_TASK_VALUE_Y, POPUP_BORDER_ROWS, SPAWN_MODAL_EXPANDED_MIN_HEIGHT, anchor_below,
-    center_popup,
+    COMPACT_AGENT_Y, COMPACT_CONTENT_ROWS, COMPACT_EDITOR_Y, COMPACT_ERROR_Y, COMPACT_MODE_Y,
+    COMPACT_TASK_Y, EXP_AGENT_LABEL_Y, EXP_AGENT_VALUE_Y, EXP_EDITOR_LABEL_Y, EXP_EDITOR_VALUE_Y,
+    EXP_ERROR_Y, EXP_MODE_LABEL_Y, EXP_MODE_VALUE_Y, EXP_TASK_LABEL_Y, EXP_TASK_VALUE_Y,
+    EXPANDED_CONTENT_ROWS, POPUP_BORDER_ROWS, POPUP_ERROR_ROWS, SPAWN_MODAL_EXPANDED_MIN_HEIGHT,
+    anchor_below, center_popup, tail_fit,
 };
 use crate::state::popup::open_worktree::clamp_scroll;
 use crate::state::{AppState, OpenField, OpenStep, OpenWorktreeRow, PopupState};
@@ -107,6 +108,7 @@ fn render_configure_step(frame: &mut Frame, state: &mut AppState, area: Rect) {
     let PopupState::OpenWorktree {
         rows,
         selected,
+        editor,
         pick,
         field,
         anchor_y,
@@ -120,6 +122,7 @@ fn render_configure_step(frame: &mut Frame, state: &mut AppState, area: Rect) {
         .get(*selected)
         .map(|r: &OpenWorktreeRow| r.label.clone())
         .unwrap_or_default();
+    let editor = editor.clone();
     let field = *field;
     let anchor_y = *anchor_y;
     let error = error.clone();
@@ -129,8 +132,12 @@ fn render_configure_step(frame: &mut Frame, state: &mut AppState, area: Rect) {
 
     let popup_width = area.width.min(32).max(area.width.min(14));
     let compact = area.height < SPAWN_MODAL_EXPANDED_MIN_HEIGHT;
-    let content_rows: u16 = if compact { 4 } else { 10 };
-    let error_rows: u16 = if error.is_some() { 1 } else { 0 };
+    let content_rows: u16 = if compact {
+        COMPACT_CONTENT_ROWS
+    } else {
+        EXPANDED_CONTENT_ROWS
+    };
+    let error_rows: u16 = if error.is_some() { POPUP_ERROR_ROWS } else { 0 };
     let popup_height = content_rows + error_rows + POPUP_BORDER_ROWS;
     let popup_rect = match anchor_y {
         Some(y) => anchor_below(area, y, popup_width, popup_height),
@@ -191,6 +198,17 @@ fn render_configure_step(frame: &mut Frame, state: &mut AppState, area: Rect) {
     let agent_value = truncate_to_width(agent, content_width);
     let mode_value = truncate_to_width(mode, content_width);
     let muted = Style::default().fg(theme.text_muted);
+    // Same tail-fit + block cursor the spawn modal's text fields use.
+    let editor_spans = {
+        let mut spans = vec![Span::styled(
+            tail_fit(&editor, content_width.saturating_sub(1)),
+            value_style(OpenField::Editor),
+        )];
+        if field == OpenField::Editor {
+            spans.push(Span::styled("█", Style::default().fg(theme.accent)));
+        }
+        spans
+    };
     let error_spans = error.as_ref().map(|err| {
         vec![Span::styled(
             truncate_to_width(err, content_width),
@@ -204,6 +222,7 @@ fn render_configure_step(frame: &mut Frame, state: &mut AppState, area: Rect) {
             COMPACT_TASK_Y,
             vec![Span::styled(branch_value, muted)],
         );
+        render_at(frame, COMPACT_EDITOR_Y, editor_spans);
         render_at(
             frame,
             COMPACT_AGENT_Y,
@@ -228,6 +247,12 @@ fn render_configure_step(frame: &mut Frame, state: &mut AppState, area: Rect) {
             EXP_TASK_VALUE_Y,
             vec![Span::styled(branch_value, muted)],
         );
+        render_at(
+            frame,
+            EXP_EDITOR_LABEL_Y,
+            vec![Span::styled("EDITOR", label_style(OpenField::Editor))],
+        );
+        render_at(frame, EXP_EDITOR_VALUE_Y, editor_spans);
         render_at(
             frame,
             EXP_AGENT_LABEL_Y,

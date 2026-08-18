@@ -291,8 +291,11 @@ enum PopupState {
         input: String,
         target_repo: String,
         target_repo_root: String,
+        /// Editor command, seeded from `@sidebar_editor`. Non-empty ⇒
+        /// the new window is split (editor left, agent right).
+        editor: String,
         pick: AgentPick,
-        field: SpawnField,
+        field: SpawnField,   // Task | Editor | Agent | Mode
         anchor_y: Option<u16>,
         error: Option<String>,
         area: Option<Rect>,
@@ -317,8 +320,9 @@ enum PopupState {
         selected: usize,
         scroll: usize,
         step: OpenStep,       // Pick | Configure
+        editor: String,       // same contract as SpawnInput's
         pick: AgentPick,
-        field: OpenField,     // Agent | Mode
+        field: OpenField,     // Editor | Agent | Mode (default Editor)
         anchor_y: Option<u16>,
         error: Option<String>,
         area: Option<Rect>,

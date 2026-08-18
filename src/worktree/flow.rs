@@ -15,6 +15,9 @@ pub struct SpawnRequest {
     pub session: String,
     pub agent: String,
     pub mode: String,
+    /// Shell command for the editor pane, e.g. `nvim`. Empty means "no
+    /// editor" and the window keeps a single pane — see [`launch_panes`].
+    pub editor: String,
 }
 
 /// Create a worktree, open a new tmux window in it, launch the agent,
@@ -88,15 +91,41 @@ pub(crate) fn spawn_with<E: SpawnEnv>(env: &E, req: &SpawnRequest) -> Result<Str
         }
     }
 
-    if let Err(e) = env.send_command(
-        &pane_id,
-        &super::config::agent_command(&req.agent, &req.mode),
-    ) {
+    if let Err(e) = launch_panes(env, &pane_id, worktree, &req.editor, &req.agent, &req.mode) {
         let rb = rollback_spawn(env, repo, worktree, &branch, Some(&window_id));
         return Err(compose_spawn_error(format!("tmux: {e}"), rb));
     }
 
     Ok(branch)
+}
+
+/// Populate the freshly created window. With no editor configured the
+/// agent gets the whole window, exactly as before this option existed.
+/// With one, the window is split so the editor keeps the original
+/// (left) pane and the agent runs in the new right-hand one — matching
+/// the usual "code on the left, agent on the right" arrangement.
+///
+/// The split runs BEFORE either command is sent so both panes are still
+/// plain shells when the keys arrive; splitting a pane that already has
+/// an editor attached would otherwise race the editor's own startup.
+/// Every step returns its error so the caller can roll the spawn back:
+/// a window with an editor but no agent is worse than no window at all.
+fn launch_panes<E: SpawnEnv>(
+    env: &E,
+    pane_id: &str,
+    cwd: &str,
+    editor: &str,
+    agent: &str,
+    mode: &str,
+) -> Result<(), String> {
+    let agent_command = super::config::agent_command(agent, mode);
+    let editor = editor.trim();
+    if editor.is_empty() {
+        return env.send_command(pane_id, &agent_command);
+    }
+    let agent_pane = env.split_window_right(pane_id, cwd)?;
+    env.send_command(pane_id, editor)?;
+    env.send_command(&agent_pane, &agent_command)
 }
 
 #[derive(Debug, Clone)]
@@ -107,6 +136,8 @@ pub struct OpenRequest {
     pub session: String,
     pub agent: String,
     pub mode: String,
+    /// Same contract as [`SpawnRequest::editor`].
+    pub editor: String,
 }
 
 /// Open an EXISTING worktree in a new tmux window and launch the agent.
@@ -168,10 +199,7 @@ pub(crate) fn open_with<E: SpawnEnv>(env: &E, req: &OpenRequest) -> Result<(), S
         }
     }
 
-    if let Err(e) = env.send_command(
-        &pane_id,
-        &super::config::agent_command(&req.agent, &req.mode),
-    ) {
+    if let Err(e) = launch_panes(env, &pane_id, worktree, &req.editor, &req.agent, &req.mode) {
         let rb = rollback_open(env, &window_id);
         return Err(compose_spawn_error(format!("tmux: {e}"), rb));
     }
@@ -315,6 +343,7 @@ mod env_tests {
         fail_worktree_remove: bool,
         fail_branch_delete: bool,
         fail_send_command: bool,
+        fail_split_window: bool,
         display_output: Option<String>,
         /// Programs `worktree_path_is_free`. `None` = default false
         /// (the worktree exists on disk). `Some(true)` = the path was
@@ -392,6 +421,14 @@ mod env_tests {
             self.log(format!("new_window({session},{cwd},{name})"));
             Ok(("%1".into(), "@1".into()))
         }
+        fn split_window_right(&self, target_pane: &str, cwd: &str) -> Result<String, String> {
+            self.log(format!("split_window_right({target_pane},{cwd})"));
+            if self.fail_split_window {
+                Err("split_window failed".into())
+            } else {
+                Ok("%2".into())
+            }
+        }
         fn kill_window(&self, window_id: &str) -> Result<(), String> {
             self.log(format!("kill_window({window_id})"));
             if self.fail_kill_window {
@@ -432,6 +469,7 @@ mod env_tests {
             session: "sess".into(),
             agent: "claude".into(),
             mode: "default".into(),
+            editor: String::new(),
         }
     }
 
@@ -447,6 +485,7 @@ mod env_tests {
             session: "sess".into(),
             agent: "claude".into(),
             mode: "default".into(),
+            editor: String::new(),
         }
     }
 
@@ -661,6 +700,9 @@ mod env_tests {
                 self.0.log("new_window(fail)".into());
                 Err("new_window failed".into())
             }
+            fn split_window_right(&self, t: &str, c: &str) -> Result<String, String> {
+                self.0.split_window_right(t, c)
+            }
             fn kill_window(&self, w: &str) -> Result<(), String> {
                 self.0.kill_window(w)
             }
@@ -686,6 +728,152 @@ mod env_tests {
         assert!(
             !has_git_call(&calls),
             "open must never touch git: {calls:?}"
+        );
+    }
+
+    // ─── editor pane ─────────────────────────────────────────────
+
+    #[test]
+    fn spawn_without_editor_keeps_a_single_pane() {
+        // The default `@sidebar_editor` is empty, so nothing about the
+        // pre-existing one-pane window may change.
+        let env = FakeEnv::default();
+        spawn_with(&env, &sample_req()).expect("spawn should succeed");
+        let calls = env.calls();
+        assert!(
+            !has_call(&calls, "split_window_right("),
+            "an empty editor must not split the window: {calls:?}"
+        );
+        assert!(has_call(&calls, "send_command(%1,claude)"));
+    }
+
+    #[test]
+    fn spawn_with_editor_splits_then_runs_editor_left_and_agent_right() {
+        let env = FakeEnv::default();
+        let req = SpawnRequest {
+            editor: "nvim".into(),
+            ..sample_req()
+        };
+        spawn_with(&env, &req).expect("spawn should succeed");
+        let calls = env.calls();
+        let split = calls
+            .iter()
+            .position(|c| c.starts_with("split_window_right"))
+            .expect("split_window_right called");
+        let editor = calls
+            .iter()
+            .position(|c| c == "send_command(%1,nvim)")
+            .expect("editor runs in the original (left) pane");
+        let agent = calls
+            .iter()
+            .position(|c| c == "send_command(%2,claude)")
+            .expect("agent runs in the new (right) pane");
+        assert!(
+            split < editor && split < agent,
+            "the split must happen while both panes are still plain shells: {calls:?}"
+        );
+        assert!(
+            has_call(&calls, "split_window_right(%1,/r/.worktrees/task)"),
+            "the agent pane is rooted in the worktree, not the sidebar's cwd: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn spawn_with_whitespace_only_editor_is_treated_as_unset() {
+        // A `@sidebar_editor` set to blanks would otherwise split the
+        // window and then send an empty line to the left pane.
+        let env = FakeEnv::default();
+        let req = SpawnRequest {
+            editor: "   ".into(),
+            ..sample_req()
+        };
+        spawn_with(&env, &req).expect("spawn should succeed");
+        assert!(!has_call(&env.calls(), "split_window_right("));
+    }
+
+    #[test]
+    fn spawn_rolls_back_when_the_split_fails() {
+        // Half a window — an editor pane with no agent — is worse than
+        // no window at all, so a failed split must roll the spawn back
+        // exactly like a failed marker or send.
+        let env = FakeEnv {
+            fail_split_window: true,
+            ..FakeEnv::default()
+        };
+        let req = SpawnRequest {
+            editor: "nvim".into(),
+            ..sample_req()
+        };
+        let err = spawn_with(&env, &req).expect_err("spawn must fail");
+        assert!(err.contains("split_window failed"), "error: {err}");
+        let calls = env.calls();
+        assert!(has_call(&calls, "kill_window(@1)"));
+        assert!(has_call(&calls, "worktree_remove("));
+        assert!(has_call(&calls, "branch_delete(/r,agent/task)"));
+        assert!(
+            !has_call(&calls, "send_command("),
+            "nothing may be launched once the split failed: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn open_with_editor_splits_and_still_touches_no_git() {
+        let env = FakeEnv::default();
+        let req = OpenRequest {
+            editor: "nvim".into(),
+            ..sample_open_req()
+        };
+        open_with(&env, &req).expect("open should succeed");
+        let calls = env.calls();
+        assert!(has_call(
+            &calls,
+            "split_window_right(%1,/r/.worktrees/login)"
+        ));
+        assert!(has_call(&calls, "send_command(%1,nvim)"));
+        assert!(has_call(&calls, "send_command(%2,claude)"));
+        assert!(!has_git_call(&calls), "open must never mutate git state");
+    }
+
+    #[test]
+    fn open_kills_the_window_when_the_split_fails() {
+        let env = FakeEnv {
+            fail_split_window: true,
+            ..FakeEnv::default()
+        };
+        let req = OpenRequest {
+            editor: "nvim".into(),
+            ..sample_open_req()
+        };
+        let err = open_with(&env, &req).expect_err("open must fail");
+        assert!(err.contains("split_window failed"), "error: {err}");
+        let calls = env.calls();
+        assert!(has_call(&calls, "kill_window(@1)"));
+        assert!(!has_git_call(&calls), "open must never mutate git state");
+    }
+
+    #[test]
+    fn spawn_editor_pane_inherits_markers_from_the_window() {
+        // Markers are written at window scope BEFORE the split, so the
+        // editor pane the split creates inherits them and `x` can still
+        // close the window from either side.
+        let env = FakeEnv::default();
+        let req = SpawnRequest {
+            editor: "nvim".into(),
+            ..sample_req()
+        };
+        spawn_with(&env, &req).expect("spawn should succeed");
+        let calls = env.calls();
+        let last_marker = calls
+            .iter()
+            .rposition(|c| c.starts_with("set_window_option("))
+            .expect("markers written");
+        let split = calls
+            .iter()
+            .position(|c| c.starts_with("split_window_right"))
+            .expect("split_window_right called");
+        assert!(
+            last_marker < split,
+            "every window-scoped marker must precede the split: {calls:?}"
         );
     }
 
@@ -1001,6 +1189,9 @@ mod env_tests {
             fn new_window(&self, _s: &str, _c: &str, _n: &str) -> Result<(String, String), String> {
                 self.0.log("new_window(fail)".into());
                 Err("new_window failed".into())
+            }
+            fn split_window_right(&self, t: &str, c: &str) -> Result<String, String> {
+                self.0.split_window_right(t, c)
             }
             fn kill_window(&self, w: &str) -> Result<(), String> {
                 self.0.kill_window(w)
