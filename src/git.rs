@@ -366,6 +366,71 @@ pub fn branch_delete(repo: &str, branch: &str) -> Result<(), String> {
     run_git_capture(repo, &["branch", "-D", branch]).map(|_| ())
 }
 
+/// One entry of `git worktree list --porcelain`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorktreeEntry {
+    pub path: String,
+    /// Short branch name (`refs/heads/` stripped). Empty when detached.
+    pub branch: String,
+    pub head: String,
+    pub bare: bool,
+    pub detached: bool,
+    pub locked: bool,
+    pub prunable: bool,
+}
+
+/// `git worktree list --porcelain` from inside `repo`. Lists the main
+/// worktree plus every linked worktree of the repository.
+pub fn worktree_list(repo: &str) -> Result<Vec<WorktreeEntry>, String> {
+    run_git_capture(repo, &["worktree", "list", "--porcelain"]).map(|out| parse_worktree_list(&out))
+}
+
+/// Parse the porcelain worktree listing. Records are separated by blank
+/// lines and each line is `<key>` or `<key> <value>`; a `worktree` line
+/// always starts a new record. Split out as a pure function so it is
+/// unit-testable without a repo, same as [`parse_status_short`] /
+/// [`parse_diff_stat`].
+pub(crate) fn parse_worktree_list(text: &str) -> Vec<WorktreeEntry> {
+    let mut entries: Vec<WorktreeEntry> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim_end();
+        if line.is_empty() {
+            continue;
+        }
+        let (key, value) = match line.split_once(' ') {
+            Some((k, v)) => (k, v.trim()),
+            None => (line, ""),
+        };
+        if key == "worktree" {
+            entries.push(WorktreeEntry {
+                path: value.to_string(),
+                ..WorktreeEntry::default()
+            });
+            continue;
+        }
+        // Keys before the first `worktree` line are malformed input; drop
+        // them rather than inventing a pathless record.
+        let Some(entry) = entries.last_mut() else {
+            continue;
+        };
+        match key {
+            "HEAD" => entry.head = value.to_string(),
+            "branch" => {
+                entry.branch = value
+                    .strip_prefix("refs/heads/")
+                    .unwrap_or(value)
+                    .to_string()
+            }
+            "detached" => entry.detached = true,
+            "bare" => entry.bare = true,
+            "locked" => entry.locked = true,
+            "prunable" => entry.prunable = true,
+            _ => {}
+        }
+    }
+    entries
+}
+
 pub(crate) fn parse_diff_stat(text: &str) -> Option<(usize, usize)> {
     let text = text.trim();
     if text.is_empty() {
@@ -464,6 +529,100 @@ mod tests {
     #[test]
     fn normalize_git_url_unknown_format() {
         assert_eq!(normalize_git_url("/local/path/repo"), "/local/path/repo");
+    }
+
+    // ─── parse_worktree_list tests ───────────────────────────────
+
+    #[test]
+    fn parse_worktree_list_main_plus_two_linked() {
+        let text = "\
+worktree /repo
+HEAD abc123
+branch refs/heads/main
+
+worktree /repo/.worktrees/login
+HEAD def456
+branch refs/heads/agent/login-fix
+
+worktree /repo/.worktrees/db
+HEAD 789abc
+branch refs/heads/agent/refactor-db
+";
+        let entries = parse_worktree_list(text);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].path, "/repo");
+        assert_eq!(entries[0].branch, "main");
+        assert_eq!(entries[0].head, "abc123");
+        assert_eq!(entries[1].path, "/repo/.worktrees/login");
+        assert_eq!(entries[1].branch, "agent/login-fix");
+        assert_eq!(entries[2].branch, "agent/refactor-db");
+        assert!(entries.iter().all(|e| !e.bare && !e.detached));
+    }
+
+    #[test]
+    fn parse_worktree_list_detached_has_no_branch() {
+        let text = "worktree /repo/.worktrees/spike\nHEAD deadbeefcafe\ndetached\n";
+        let entries = parse_worktree_list(text);
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].detached);
+        assert!(entries[0].branch.is_empty());
+        assert_eq!(entries[0].head, "deadbeefcafe");
+    }
+
+    #[test]
+    fn parse_worktree_list_bare_record() {
+        let text = "worktree /repo.git\nbare\n";
+        let entries = parse_worktree_list(text);
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].bare);
+        assert!(entries[0].head.is_empty());
+    }
+
+    #[test]
+    fn parse_worktree_list_locked_and_prunable_with_and_without_reason() {
+        let text = "\
+worktree /a
+HEAD 1
+branch refs/heads/a
+locked
+
+worktree /b
+HEAD 2
+branch refs/heads/b
+locked on removable media
+prunable gitdir file points to non-existent location
+
+worktree /c
+HEAD 3
+branch refs/heads/c
+prunable
+";
+        let entries = parse_worktree_list(text);
+        assert_eq!(entries.len(), 3);
+        assert!(entries[0].locked && !entries[0].prunable);
+        assert!(entries[1].locked && entries[1].prunable);
+        assert!(!entries[2].locked && entries[2].prunable);
+    }
+
+    #[test]
+    fn parse_worktree_list_branch_without_refs_heads_prefix_kept_verbatim() {
+        let text = "worktree /a\nHEAD 1\nbranch refs/remotes/origin/main\n";
+        let entries = parse_worktree_list(text);
+        assert_eq!(entries[0].branch, "refs/remotes/origin/main");
+    }
+
+    #[test]
+    fn parse_worktree_list_tolerates_empty_and_blank_runs() {
+        assert!(parse_worktree_list("").is_empty());
+        assert!(parse_worktree_list("\n\n\n").is_empty());
+        // Keys before the first `worktree` line have no record to attach
+        // to and must not create a pathless entry.
+        assert!(parse_worktree_list("HEAD abc\nbranch refs/heads/x\n").is_empty());
+
+        let entries = parse_worktree_list("\n\nworktree /a\n\n\n\nworktree /b\n\n");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].path, "/a");
+        assert_eq!(entries[1].path, "/b");
     }
 
     // ─── parse_status_short tests ────────────────────────────────

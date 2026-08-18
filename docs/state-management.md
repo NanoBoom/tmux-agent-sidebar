@@ -87,7 +87,7 @@ Per-pane file-based state:
 | `git` | Every 2s (bg thread) | Branch, diff stats, ahead/behind, PR number |
 | `bottom_tab` | On user input / auto-switch | Current bottom panel tab |
 | `theme` | Once at startup | Color theme from tmux `@sidebar_color_*` variables |
-| `popup` | On user input / render | `PopupState` enum: `None` / `Repo { selected, area }` / `Notices { area }`. Enforces "at most one popup open" via the type system |
+| `popup` | On user input / render | `PopupState` enum: `None` / `Repo { selected, area }` / `Notices { area }` / `SpawnInput { … }` / `RemoveConfirm { … }` / `OpenWorktree { … }`. Enforces "at most one popup open" via the type system |
 | `layout` | Every frame (render) | `FrameLayout` sub-struct bundling the ephemeral fields the UI rewrites every frame for click hit-testing: `pane_row_targets`, `line_to_row`, `repo_button_col`, `repo_spawn_targets`, `spawn_remove_targets`, `hyperlink_overlays` |
 | `notices` | Once at startup / on copy | `NoticesState` sub-struct: `button_col`, `missing_hook_groups`, `claude_plugin_status`, `claude_settings_has_residual_hooks`, `claude_plugin_notice`, `copy_targets`, `copied_at` |
 | `timers` | Refresh cycle / on user input | `RefreshTimers` sub-struct gating periodic work: `last_filter_click` (debounce), `last_port_refresh`, `port_scan_initialized` |
@@ -291,8 +291,7 @@ enum PopupState {
         input: String,
         target_repo: String,
         target_repo_root: String,
-        agent_idx: usize,
-        mode_idx: usize,
+        pick: AgentPick,
         field: SpawnField,
         anchor_y: Option<u16>,
         error: Option<String>,
@@ -305,6 +304,41 @@ enum PopupState {
         error: Option<String>,
         area: Option<Rect>,
     },
+    /// Two-step modal for opening an EXISTING worktree (`o`): pick the
+    /// worktree, then pick the agent + mode. One variant holds both
+    /// steps so `rows` survives the transition and `Esc` can walk back
+    /// without re-running `git worktree list`.
+    OpenWorktree {
+        target_repo_root: String,
+        rows: Vec<OpenWorktreeRow>,
+        selected: usize,
+        scroll: usize,
+        step: OpenStep,       // Pick | Configure
+        pick: AgentPick,
+        field: OpenField,     // Agent | Mode
+        anchor_y: Option<u16>,
+        error: Option<String>,
+        area: Option<Rect>,
+    },
+}
+
+/// Agent + permission-mode selection shared by `SpawnInput` and
+/// `OpenWorktree`. Owns the cycle rules (agent wrap resets the mode,
+/// mode wraps against `worktree::modes_for(agent)`).
+struct AgentPick {
+    agent_idx: usize,
+    mode_idx: usize,
+}
+
+/// One row of the open-worktree picker. `branch` feeds the window's
+/// branch marker; `label` is the display string (`(detached <sha7>)`
+/// when there is no branch). `in_use` is derived from `repo_groups`
+/// pane paths, so it costs no extra tmux or git call.
+struct OpenWorktreeRow {
+    path: String,
+    branch: String,
+    label: String,
+    in_use: bool,
 }
 
 struct ScrollState {

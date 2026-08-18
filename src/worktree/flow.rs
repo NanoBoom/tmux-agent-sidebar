@@ -3,8 +3,8 @@ use std::path::{Component, Path, PathBuf};
 use super::config::{DEFAULT_BRANCH_PREFIX, RemoveMode};
 use super::env::{RealEnv, SpawnEnv};
 use super::markers::{
-    SPAWNED_BRANCH_OPTION, SPAWNED_FROM_OPTION, SPAWNED_OPTION, SPAWNED_WORKTREE_OPTION,
-    SpawnMarkers, spawn_markers_template,
+    OPENED_OPTION, SPAWNED_BRANCH_OPTION, SPAWNED_FROM_OPTION, SPAWNED_OPTION,
+    SPAWNED_WORKTREE_OPTION, SpawnMarkers, spawn_markers_template,
 };
 use super::slug::{MAX_COLLISION_ATTEMPTS, pick_unique_slug, slugify, worktree_path_for};
 
@@ -99,6 +99,96 @@ pub(crate) fn spawn_with<E: SpawnEnv>(env: &E, req: &SpawnRequest) -> Result<Str
     Ok(branch)
 }
 
+#[derive(Debug, Clone)]
+pub struct OpenRequest {
+    pub repo_root: PathBuf,
+    pub worktree_path: PathBuf,
+    pub branch: String,
+    pub session: String,
+    pub agent: String,
+    pub mode: String,
+}
+
+/// Open an EXISTING worktree in a new tmux window and launch the agent.
+/// Unlike [`spawn`] this creates no git state, so the failure path only
+/// has to kill the window it created — there is nothing to roll back on
+/// disk.
+///
+/// The window carries the full [`SPAWNED_OPTION`] marker set, so `x`
+/// treats it exactly like a spawned window (including the `[y]` option,
+/// which will `git worktree remove --force` + `git branch -D` a
+/// worktree the sidebar did not create). [`OPENED_OPTION`] is written
+/// alongside it as the only record that the git state predates the
+/// sidebar.
+pub fn open(req: &OpenRequest) -> Result<(), String> {
+    open_with(&RealEnv, req)
+}
+
+pub(crate) fn open_with<E: SpawnEnv>(env: &E, req: &OpenRequest) -> Result<(), String> {
+    let repo = req
+        .repo_root
+        .to_str()
+        .ok_or("repo root is not valid UTF-8")?;
+    let worktree = req
+        .worktree_path
+        .to_str()
+        .ok_or("worktree path is not UTF-8")?;
+    if worktree.is_empty() {
+        return Err("worktree path is empty".into());
+    }
+    // Window name mirrors spawn's: the worktree directory basename.
+    let window_name = req
+        .worktree_path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| worktree.to_string());
+
+    let (pane_id, window_id) = env
+        .new_window(&req.session, worktree, &window_name)
+        .map_err(|e| format!("tmux: {e}"))?;
+
+    // Window scope, same as spawn, so panes split off later inherit the
+    // markers through tmux's option fall-through. `SPAWNED_OPTION` is
+    // what `x`, the `×` click marker and `remove_with` all key off, so
+    // setting it here is what makes an opened window behave exactly
+    // like a spawned one.
+    for (key, value) in [
+        (SPAWNED_OPTION, "1"),
+        (OPENED_OPTION, "1"),
+        (SPAWNED_FROM_OPTION, repo),
+        (SPAWNED_WORKTREE_OPTION, worktree),
+        (SPAWNED_BRANCH_OPTION, req.branch.as_str()),
+    ] {
+        if let Err(e) = env.set_window_option(&window_id, key, value) {
+            let rb = rollback_open(env, &window_id);
+            return Err(compose_spawn_error(
+                format!("tmux: failed to set {key}: {e}"),
+                rb,
+            ));
+        }
+    }
+
+    if let Err(e) = env.send_command(
+        &pane_id,
+        &super::config::agent_command(&req.agent, &req.mode),
+    ) {
+        let rb = rollback_open(env, &window_id);
+        return Err(compose_spawn_error(format!("tmux: {e}"), rb));
+    }
+
+    Ok(())
+}
+
+/// Best-effort rollback after a partial open. The window is the only
+/// thing `open_with` created, so this is deliberately the whole of it —
+/// no git step belongs here.
+fn rollback_open<E: SpawnEnv>(env: &E, window_id: &str) -> Vec<String> {
+    match env.kill_window(window_id) {
+        Ok(()) => Vec::new(),
+        Err(e) => vec![format!("kill_window: {e}")],
+    }
+}
+
 /// Best-effort rollback after a partial spawn. Kills the tmux window
 /// (when one was created), removes the git worktree, and deletes the
 /// branch ref that `git worktree add -b` created. Each step collects
@@ -162,19 +252,27 @@ pub(crate) fn remove_with<E: SpawnEnv>(
 ) -> Result<(), String> {
     let markers = SpawnMarkers::parse(&env.display_message(pane_id, &spawn_markers_template()));
     if !markers.is_spawned() {
-        return Err("pane was not created by sidebar spawn".into());
-    }
-    if markers.worktree_path.is_empty() {
-        return Err("spawned worktree path is unset".into());
-    }
-    if markers.branch.is_empty() {
-        return Err("spawned branch is unset".into());
+        return Err("pane was not created by the sidebar".into());
     }
     if markers.window_id.is_empty() {
         return Err("could not resolve window id".into());
     }
 
     if mode == RemoveMode::WindowAndWorktree {
+        // Only the git cleanup consumes these, so they are required
+        // here rather than up front — the window-only close needs
+        // neither.
+        if markers.worktree_path.is_empty() {
+            return Err("spawned worktree path is unset".into());
+        }
+        // A worktree opened with `o` on a detached HEAD legitimately
+        // has no branch, and its worktree is still removable. An empty
+        // branch on a *spawned* window means the marker set is corrupt
+        // (`spawn_with` always writes one), so there we refuse rather
+        // than guess.
+        if markers.branch.is_empty() && !markers.is_opened() {
+            return Err("spawned branch is unset".into());
+        }
         if env.worktree_path_exists(&markers.worktree_path) {
             env.worktree_remove(&markers.from_repo, &markers.worktree_path)
                 .map_err(|e| format!("git: {e}"))?;
@@ -182,7 +280,7 @@ pub(crate) fn remove_with<E: SpawnEnv>(
         // `git worktree remove` leaves the branch ref behind; drop
         // it here, before `kill_window`, so a failure still leaves
         // the window as a retry handle.
-        if env.branch_exists(&markers.from_repo, &markers.branch) {
+        if !markers.branch.is_empty() && env.branch_exists(&markers.from_repo, &markers.branch) {
             env.branch_delete(&markers.from_repo, &markers.branch)
                 .map_err(|e| format!("git: {e}"))?;
         }
@@ -323,6 +421,253 @@ mod env_tests {
 
     fn has_call(calls: &[String], prefix: &str) -> bool {
         calls.iter().any(|c| c.starts_with(prefix))
+    }
+
+    fn sample_open_req() -> OpenRequest {
+        OpenRequest {
+            repo_root: PathBuf::from("/r"),
+            worktree_path: PathBuf::from("/r/.worktrees/login"),
+            branch: "agent/login-fix".into(),
+            session: "sess".into(),
+            agent: "claude".into(),
+            mode: "default".into(),
+        }
+    }
+
+    /// Every git mutation `SpawnEnv` exposes. `open` must never call any
+    /// of them on any path — that is the property separating it from
+    /// `spawn`.
+    fn has_git_call(calls: &[String]) -> bool {
+        calls.iter().any(|c| {
+            c.starts_with("worktree_add(")
+                || c.starts_with("worktree_remove(")
+                || c.starts_with("branch_delete(")
+        })
+    }
+
+    // ─── open flow ───────────────────────────────────────────────
+
+    #[test]
+    fn open_happy_path_sets_markers_then_sends_command() {
+        let env = FakeEnv::default();
+        open_with(&env, &sample_open_req()).expect("open should succeed");
+        let calls = env.calls();
+        assert_eq!(
+            calls,
+            vec![
+                "new_window(sess,/r/.worktrees/login,login)".to_string(),
+                format!("set_window_option(@1,{SPAWNED_OPTION})"),
+                format!("set_window_option(@1,{OPENED_OPTION})"),
+                format!("set_window_option(@1,{SPAWNED_FROM_OPTION})"),
+                format!("set_window_option(@1,{SPAWNED_WORKTREE_OPTION})"),
+                format!("set_window_option(@1,{SPAWNED_BRANCH_OPTION})"),
+                "send_command(%1,claude)".to_string(),
+            ],
+            "open must create the window, write 5 markers, then launch the agent"
+        );
+    }
+
+    #[test]
+    fn open_sets_the_spawned_marker_so_x_treats_it_like_a_spawned_window() {
+        // `x`, the `×` click marker and `remove_with` all key off
+        // SPAWNED_OPTION. Setting it here is the single point that
+        // makes an opened window closable from the sidebar.
+        let env = FakeEnv::default();
+        open_with(&env, &sample_open_req()).expect("open should succeed");
+        let calls = env.calls();
+        assert!(
+            has_call(&calls, &format!("set_window_option(@1,{SPAWNED_OPTION})")),
+            "open must set the spawned marker: {calls:?}"
+        );
+        assert!(
+            has_call(&calls, &format!("set_window_option(@1,{OPENED_OPTION})")),
+            "open must still record provenance: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn opened_window_markers_parse_as_both_spawned_and_opened() {
+        // End-to-end on the marker contract: what `open` writes must be
+        // what `remove_with`'s `is_spawned()` guard accepts, while
+        // `is_opened()` still distinguishes it from a spawned window.
+        let markers = SpawnMarkers::parse("1\n/r\n/r/.worktrees/login\nagent/login-fix\n@1\n1\n");
+        assert!(markers.is_spawned(), "`x` must accept an opened window");
+        assert!(markers.is_opened(), "provenance is still recorded");
+    }
+
+    #[test]
+    fn open_never_touches_git_on_any_path() {
+        for env in [
+            FakeEnv::default(),
+            FakeEnv {
+                fail_set_option_at: Some(0),
+                ..FakeEnv::default()
+            },
+            FakeEnv {
+                fail_set_option_at: Some(2),
+                ..FakeEnv::default()
+            },
+            FakeEnv {
+                fail_send_command: true,
+                ..FakeEnv::default()
+            },
+            FakeEnv {
+                fail_send_command: true,
+                fail_kill_window: true,
+                ..FakeEnv::default()
+            },
+        ] {
+            let _ = open_with(&env, &sample_open_req());
+            assert!(
+                !has_git_call(&env.calls()),
+                "open must never mutate git state: {:?}",
+                env.calls()
+            );
+        }
+    }
+
+    #[test]
+    fn open_kills_window_when_first_marker_fails() {
+        let env = FakeEnv {
+            fail_set_option_at: Some(0),
+            ..FakeEnv::default()
+        };
+        let err = open_with(&env, &sample_open_req()).expect_err("open must fail");
+        assert!(
+            err.contains(SPAWNED_OPTION),
+            "error names the marker: {err}"
+        );
+        let calls = env.calls();
+        assert!(has_call(&calls, "kill_window(@1)"), "rollback: {calls:?}");
+        assert!(
+            !has_call(&calls, "send_command("),
+            "send_command must not run after a marker failure: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn open_kills_window_when_middle_marker_fails() {
+        let env = FakeEnv {
+            fail_set_option_at: Some(2),
+            ..FakeEnv::default()
+        };
+        let err = open_with(&env, &sample_open_req()).expect_err("open must fail");
+        assert!(
+            err.contains(SPAWNED_FROM_OPTION),
+            "error names the third marker: {err}"
+        );
+        let calls = env.calls();
+        assert!(has_call(&calls, "kill_window(@1)"), "rollback: {calls:?}");
+        assert!(!has_call(&calls, "send_command("));
+    }
+
+    #[test]
+    fn open_kills_window_when_send_command_fails() {
+        let env = FakeEnv {
+            fail_send_command: true,
+            ..FakeEnv::default()
+        };
+        let err = open_with(&env, &sample_open_req()).expect_err("open must fail");
+        assert!(err.contains("send_command failed"), "error: {err}");
+        assert!(has_call(&env.calls(), "kill_window(@1)"));
+    }
+
+    #[test]
+    fn open_surfaces_rollback_failure_when_kill_window_also_fails() {
+        let env = FakeEnv {
+            fail_send_command: true,
+            fail_kill_window: true,
+            ..FakeEnv::default()
+        };
+        let err = open_with(&env, &sample_open_req()).expect_err("open must fail");
+        assert!(
+            err.contains("send_command failed"),
+            "primary error surfaced: {err}"
+        );
+        assert!(
+            err.contains("rollback incomplete") && err.contains("kill_window"),
+            "rollback failure surfaced: {err}"
+        );
+    }
+
+    #[test]
+    fn open_rejects_empty_worktree_path() {
+        let env = FakeEnv::default();
+        let req = OpenRequest {
+            worktree_path: PathBuf::new(),
+            ..sample_open_req()
+        };
+        let err = open_with(&env, &req).expect_err("open must fail");
+        assert!(err.contains("worktree path is empty"), "error: {err}");
+        assert!(
+            !has_call(&env.calls(), "new_window("),
+            "no window may be created for an empty path: {:?}",
+            env.calls()
+        );
+    }
+
+    #[test]
+    fn open_surfaces_new_window_failure_without_rollback() {
+        #[derive(Default)]
+        struct NewWindowFailingEnv(FakeEnv);
+        impl SpawnEnv for NewWindowFailingEnv {
+            fn branch_prefix(&self) -> Option<String> {
+                self.0.branch_prefix()
+            }
+            fn worktree_dir(&self) -> Option<String> {
+                self.0.worktree_dir()
+            }
+            fn branch_is_free(&self, r: &str, b: &str) -> bool {
+                self.0.branch_is_free(r, b)
+            }
+            fn branch_exists(&self, r: &str, b: &str) -> bool {
+                self.0.branch_exists(r, b)
+            }
+            fn worktree_path_is_free(&self, p: &Path) -> bool {
+                self.0.worktree_path_is_free(p)
+            }
+            fn worktree_path_exists(&self, p: &str) -> bool {
+                self.0.worktree_path_exists(p)
+            }
+            fn worktree_add(&self, r: &str, p: &str, b: &str) -> Result<(), String> {
+                self.0.worktree_add(r, p, b)
+            }
+            fn worktree_remove(&self, r: &str, p: &str) -> Result<(), String> {
+                self.0.worktree_remove(r, p)
+            }
+            fn branch_delete(&self, r: &str, b: &str) -> Result<(), String> {
+                self.0.branch_delete(r, b)
+            }
+            fn new_window(&self, _s: &str, _c: &str, _n: &str) -> Result<(String, String), String> {
+                self.0.log("new_window(fail)".into());
+                Err("new_window failed".into())
+            }
+            fn kill_window(&self, w: &str) -> Result<(), String> {
+                self.0.kill_window(w)
+            }
+            fn set_window_option(&self, w: &str, k: &str, v: &str) -> Result<(), String> {
+                self.0.set_window_option(w, k, v)
+            }
+            fn send_command(&self, t: &str, c: &str) -> Result<(), String> {
+                self.0.send_command(t, c)
+            }
+            fn display_message(&self, p: &str, t: &str) -> String {
+                self.0.display_message(p, t)
+            }
+        }
+
+        let env = NewWindowFailingEnv::default();
+        let err = open_with(&env, &sample_open_req()).expect_err("open must fail");
+        assert!(err.contains("new_window failed"), "error: {err}");
+        let calls = env.0.calls();
+        assert!(
+            !has_call(&calls, "kill_window("),
+            "no window was ever created: {calls:?}"
+        );
+        assert!(
+            !has_git_call(&calls),
+            "open must never touch git: {calls:?}"
+        );
     }
 
     #[test]
@@ -658,7 +1003,7 @@ mod env_tests {
         };
         let err =
             remove_with(&env, "%1", RemoveMode::WindowAndWorktree).expect_err("remove must fail");
-        assert!(err.contains("not created by sidebar spawn"));
+        assert!(err.contains("not created by the sidebar"));
         assert!(!has_call(&env.calls(), "kill_window("));
     }
 
@@ -707,6 +1052,82 @@ mod env_tests {
             remove_with(&env, "%1", RemoveMode::WindowAndWorktree).expect_err("remove must fail");
         assert!(err.contains("branch is unset"), "error: {err}");
         assert!(!has_call(&env.calls(), "worktree_remove("));
+        assert!(!has_call(&env.calls(), "kill_window("));
+    }
+
+    #[test]
+    fn remove_window_only_works_without_a_branch_marker() {
+        // A worktree opened on a detached HEAD has no branch. The
+        // branch is only an input to the git cleanup, so requiring it
+        // up front used to block the harmless window-only close too.
+        let env = FakeEnv {
+            display_output: Some("1\n/r\n/r/.worktrees/spike\n\n@1\n1\n".into()),
+            ..FakeEnv::default()
+        };
+        remove_with(&env, "%1", RemoveMode::WindowOnly)
+            .expect("closing the window must not depend on a branch");
+        let calls = env.calls();
+        assert!(has_call(&calls, "kill_window(@1)"));
+        assert!(!has_call(&calls, "worktree_remove("));
+        assert!(!has_call(&calls, "branch_delete("));
+    }
+
+    #[test]
+    fn remove_window_only_works_without_a_worktree_path_marker() {
+        let env = FakeEnv {
+            display_output: Some("1\n/r\n\n\n@1\n".into()),
+            ..FakeEnv::default()
+        };
+        remove_with(&env, "%1", RemoveMode::WindowOnly)
+            .expect("closing the window must not depend on the worktree path");
+        assert!(has_call(&env.calls(), "kill_window(@1)"));
+    }
+
+    #[test]
+    fn remove_worktree_of_opened_detached_checkout_skips_branch_delete() {
+        // `o` on a detached worktree writes an empty branch marker. The
+        // worktree is still removable; there is simply no branch to
+        // drop, and demanding one would make `[y]` unusable there.
+        let env = FakeEnv {
+            display_output: Some("1\n/r\n/r/.worktrees/spike\n\n@1\n1\n".into()),
+            ..FakeEnv::default()
+        };
+        remove_with(&env, "%1", RemoveMode::WindowAndWorktree)
+            .expect("a detached opened worktree must still be removable");
+        let calls = env.calls();
+        assert!(has_call(&calls, "worktree_remove(/r,/r/.worktrees/spike)"));
+        assert!(
+            !has_call(&calls, "branch_delete("),
+            "there is no branch to delete: {calls:?}"
+        );
+        assert!(has_call(&calls, "kill_window(@1)"));
+    }
+
+    #[test]
+    fn remove_still_rejects_spawned_pane_with_corrupt_empty_branch() {
+        // Same empty branch, but WITHOUT the opened marker: that can
+        // only be a corrupt marker set, since `spawn_with` always
+        // writes a branch. Refuse rather than half-clean.
+        let env = FakeEnv {
+            display_output: Some("1\n/r\n/r/.worktrees/task\n\n@1\n\n".into()),
+            ..FakeEnv::default()
+        };
+        let err =
+            remove_with(&env, "%1", RemoveMode::WindowAndWorktree).expect_err("remove must fail");
+        assert!(err.contains("branch is unset"), "error: {err}");
+        assert!(!has_call(&env.calls(), "worktree_remove("));
+        assert!(!has_call(&env.calls(), "kill_window("));
+    }
+
+    #[test]
+    fn remove_still_requires_worktree_path_for_git_cleanup() {
+        let env = FakeEnv {
+            display_output: Some("1\n/r\n\nagent/task\n@1\n".into()),
+            ..FakeEnv::default()
+        };
+        let err =
+            remove_with(&env, "%1", RemoveMode::WindowAndWorktree).expect_err("remove must fail");
+        assert!(err.contains("worktree path is unset"), "error: {err}");
         assert!(!has_call(&env.calls(), "kill_window("));
     }
 

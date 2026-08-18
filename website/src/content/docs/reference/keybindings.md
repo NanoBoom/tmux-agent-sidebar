@@ -1,6 +1,6 @@
 ---
 title: Keybindings
-description: Every shortcut in the sidebar, the worktree spawn modal, and the close-pane modal.
+description: Every shortcut in the sidebar, the worktree spawn and open modals, and the close-pane modal.
 ---
 
 ## Sidebar
@@ -40,10 +40,11 @@ Opened by clicking the `ⓘ` badge shown when hooks or plugin setup are missing.
 
 ## Worktree
 
-| Key | Action                                 |
-| --- | -------------------------------------- |
-| `n` | Spawn a new worktree + agent           |
-| `x` | Remove the selected spawn-created pane |
+| Key | Action                                       |
+| --- | -------------------------------------------- |
+| `n` | Spawn a new worktree + agent                 |
+| `o` | Open an existing worktree with an agent      |
+| `x` | Close the selected sidebar-created pane      |
 
 ## Spawn worktree modal
 
@@ -57,9 +58,39 @@ Opened with `n` on a repo.
 | `Enter`                            | Create the worktree + window and launch the agent                                                |
 | `Esc`                              | Cancel                                                                                           |
 
+## Open worktree modal
+
+Opened with `o` on a pane. Lists every existing worktree of that pane's
+repository — the main checkout included — and launches an agent in the
+one you pick. Unlike `n` this creates no git state, but the resulting
+window is closed with `x` just like a spawned one — including the `[y]`
+option, which will delete a worktree and branch you created yourself.
+
+### Step 1 — pick the worktree
+
+A `●` in front of a row means a pane is already running in that
+worktree. It is informational: `Enter` still opens a new window.
+
+| Key                                 | Action                          |
+| ----------------------------------- | ------------------------------- |
+| `j` / `k` / `↑` / `↓` / `Ctrl+n` / `Ctrl+p` | Move selection          |
+| `Enter`                             | Confirm and go to step 2        |
+| `Esc`                               | Close the modal                 |
+
+### Step 2 — pick the agent and mode
+
+`BRANCH` is read-only — it shows what you picked in step 1.
+
+| Key                              | Action                                        |
+| -------------------------------- | --------------------------------------------- |
+| `↑` / `↓` / `Tab` / `Shift+Tab`  | Move focus between `AGENT` / `MODE`           |
+| `←` / `→`                        | Cycle the focused value                       |
+| `Enter`                          | Open a window in the worktree and launch      |
+| `Esc`                            | Back to step 1                                |
+
 ## Close pane modal
 
-Opened with `x` on a spawn-created pane.
+Opened with `x` on a sidebar-created pane (`n` or `o`).
 
 | Key             | Action                                                                                                    |
 | --------------- | --------------------------------------------------------------------------------------------------------- |

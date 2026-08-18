@@ -1,6 +1,6 @@
 ---
 title: Worktrees
-description: Spawn and remove git worktrees — with their agent — from inside the sidebar.
+description: Spawn, open, and remove git worktrees — with their agent — from inside the sidebar.
 ---
 
 import { Image } from 'astro:assets';
@@ -9,6 +9,8 @@ import spawn from '../../../assets/captures/worktree-spawn.png';
 <Image src={spawn} alt="worktree spawn popup" densities={[1.5, 2]} />
 
 The sidebar can create a git worktree, open a new tmux window, and launch an agent in it — all from one keystroke. Closing lets you pick the scope: tear down the window, worktree, and branch together, or keep the worktree/branch on disk and only close the window.
+
+Already have the worktree? `o` opens the same "new window + agent" flow against a worktree that already exists, without creating any git state.
 
 ## Spawn modal
 
@@ -32,13 +34,65 @@ The modal's `NAME` field is slugified (lowercase, non-alphanumeric → `-`) and 
 
 Defaults for the agent, branch prefix, and worktree directory live in tmux options — see [tmux options](/tmux-agent-sidebar/reference/tmux-options/) for the full list.
 
+## Open worktree modal
+
+Opened with `o` on a pane. It lists every existing worktree of that
+pane's repository — including the main checkout — and launches an agent
+in the one you pick. Bare worktrees and prunable / missing ones are
+filtered out, since `tmux new-window` in them would fail.
+
+### Step 1 — pick the worktree
+
+| Key                                          | Action                   |
+| -------------------------------------------- | ------------------------ |
+| `j` / `k` / `↑` / `↓` / `Ctrl+n` / `Ctrl+p`  | Move selection           |
+| `Enter`                                       | Confirm, go to step 2    |
+| `Esc` / click outside                         | Cancel                   |
+
+A `●` before a row means a pane is already running in that worktree.
+It is informational only — `Enter` still opens a new window.
+
+### Step 2 — pick the agent and mode
+
+| Key                              | Action                                             |
+| -------------------------------- | -------------------------------------------------- |
+| `↑` / `↓` / `Tab` / `Shift+Tab`  | Move focus between `AGENT` / `MODE`                |
+| `←` / `→`                        | Cycle the focused value                            |
+| `Enter`                          | Open the window in that worktree and launch        |
+| `Esc`                            | Back to step 1                                     |
+
+`BRANCH` is read-only — it echoes what you picked in step 1.
+
+### Closing it again
+
+Opened windows carry the same `@agent-sidebar-spawned` marker set as
+spawned ones, so `x` (and the `×` click marker) behave identically —
+including `[y]`, which runs `git worktree remove --force` and
+`git branch -D`.
+
+:::caution
+`[y]` on an opened worktree deletes a worktree and branch **you**
+created, not one the sidebar made. `--force` discards uncommitted
+changes, and `-D` deletes the branch even when it has not been merged.
+Use `[c]` to just close the window. Recover a deleted branch via
+`git reflog`.
+:::
+
+Windows opened this way also set `@agent-sidebar-opened=1`. Nothing in
+the sidebar keys off it — it exists so `tmux show-options -w` still
+tells you the git state predates the sidebar.
+
+Removing the *main* worktree is refused by git itself (`fatal: '…' is a
+main working tree`); the error surfaces in the modal and nothing is
+deleted.
+
 ## Close pane modal
 
-Opened with `x` on a spawn-created pane, or by clicking the `×` button next to the branch name.
+Opened with `x` on a sidebar-created pane (spawned with `n` or opened with `o`), or by clicking the `×` button next to the branch name.
 
 | Key             | Action                                                                                                                                 |
 | --------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `y` / `Enter`   | Close the tmux window, remove the git worktree (`--force`), **and** delete the branch the spawn created (`git branch -D`)             |
+| `y` / `Enter`   | Close the tmux window, remove the git worktree (`--force`), **and** delete its branch (`git branch -D`) — see the caution above for `o`-opened worktrees |
 | `c`             | Close the tmux window only, keep the worktree and branch on disk                                                                       |
 | `n` / `Esc`     | Cancel                                                                                                                                 |
 
