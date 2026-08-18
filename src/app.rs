@@ -11,7 +11,6 @@ use crossterm::event::{self};
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 use crate::SPINNER_PULSE;
-use crate::state::BottomTab;
 
 mod input;
 mod render;
@@ -88,7 +87,9 @@ pub fn run(
         if sigusr1 || last_refresh.elapsed() >= refresh_interval {
             let previous_focused_pane_id = state.focus_state.focused_pane_id.clone();
             let is_window_active = state.refresh();
-            if state.focus_state.focused_pane_id != previous_focused_pane_id {
+            if state.bottom_panel_visible()
+                && state.focus_state.focused_pane_id != previous_focused_pane_id
+            {
                 render::refresh_git_for_focused_pane(&mut state);
             }
             needs_redraw = true;
@@ -101,7 +102,7 @@ pub fn run(
             } else {
                 window_inactive_count = window_inactive_count.saturating_add(1);
             }
-            git_tab_active.store(state.bottom_tab == BottomTab::GitStatus, Ordering::Relaxed);
+            git_tab_active.store(state.git_polling_wanted(), Ordering::Relaxed);
             last_refresh = std::time::Instant::now();
         }
 

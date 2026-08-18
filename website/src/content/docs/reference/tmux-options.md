@@ -13,7 +13,8 @@ Most options must be set **before** loading the plugin in your `tmux.conf`. Colo
 | `@sidebar_key_all`               | `E`     | Prefix-triggered keybinding to toggle the sidebar in all windows                        |
 | `@sidebar_width`                 | `15%`   | Width in columns or as a percentage                                                     |
 | `@sidebar_position`              | `left`  | Sidebar placement (`left` or `right`)                                                   |
-| `@sidebar_bottom_height`         | `20`    | Bottom panel height in lines (set `0` to hide)                                          |
+| `@sidebar_bottom`                | `on`    | Master switch for the Activity / Git bottom panel. `off` also stops the work that only feeds it — activity-log parsing, bottom-tab auto-switching and the 2-second git poll (`git status` / `gh pr view`) |
+| `@sidebar_bottom_height`         | `20`    | Bottom panel height in lines (`0` is equivalent to `@sidebar_bottom off`)                |
 | `@sidebar_auto_create`           | `on`    | Auto-create the sidebar on new windows (set `off` to disable)                           |
 | `@sidebar_auto_create_delay`     | `0`     | Seconds to defer auto-create after a window opens, so a declaratively-built window (e.g. tmuxinator's `select-layout`) finishes before the sidebar pane is injected; accepts fractional seconds. `0` keeps the create synchronous |
 | `@sidebar_notifications`         | `on`    | Master switch for desktop notifications                                                 |

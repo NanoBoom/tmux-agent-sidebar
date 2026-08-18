@@ -122,6 +122,12 @@ pub struct AppState {
     /// Height of the bottom panel in lines. Loaded once at startup from
     /// the `@sidebar_bottom_height` tmux option. A value of 0 hides the panel.
     pub bottom_panel_height: u16,
+    /// Whether the bottom panel is enabled at all. Loaded once at startup from
+    /// the `@sidebar_bottom` tmux option, defaulting to `true`. When `false`,
+    /// the panel is neither drawn nor fed: activity-log reads, bottom-tab
+    /// auto-switching and git polling are all skipped. See
+    /// [`AppState::bottom_panel_visible`].
+    pub bottom_panel_enabled: bool,
     /// Maps session_id → session name, refreshed periodically from
     /// `~/.claude/sessions/*.json` files. The `dirty` flag is `true` when
     /// the map has changed since the last `refresh_session_names`
@@ -179,11 +185,21 @@ impl AppState {
             version_notice: None,
             global: GlobalState::new(),
             bottom_panel_height: crate::ui::BOTTOM_PANEL_HEIGHT,
+            bottom_panel_enabled: true,
             sessions: SessionNamesState::new(),
             pet_enabled: false,
         };
         crate::state::pet::reseed_pet_idle_motion(&mut state);
         state
+    }
+
+    /// Whether the bottom panel occupies screen space this frame.
+    ///
+    /// Single source of truth for both the renderer and every background
+    /// producer that only feeds the panel. `@sidebar_bottom off` and
+    /// `@sidebar_bottom_height 0` are equivalent ways to turn it off.
+    pub fn bottom_panel_visible(&self) -> bool {
+        self.bottom_panel_enabled && self.bottom_panel_height > 0
     }
 }
 

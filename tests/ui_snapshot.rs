@@ -73,6 +73,35 @@ fn snapshot_secondary_header_without_notices() {
     ");
 }
 
+// `@sidebar_bottom off` must hand the whole frame to the pane list, exactly
+// like `@sidebar_bottom_height 0` does.
+#[test]
+fn snapshot_bottom_panel_disabled_by_option() {
+    let pane = make_pane(AgentType::Claude, PaneStatus::Idle);
+    let mut state = make_state(vec![SessionInfo {
+        session_name: "main".into(),
+        windows: vec![WindowInfo {
+            window_id: "@1".into(),
+            window_name: "project".into(),
+            window_active: true,
+            auto_rename: false,
+            panes: vec![pane.clone()],
+        }],
+    }]);
+    state.repo_groups = vec![make_repo_group("project", vec![pane])];
+    state.bottom_panel_enabled = false;
+    state.rebuild_row_targets();
+
+    let output = render_to_string(&mut state, 28, 10);
+    insta::assert_snapshot!(output, @r"
+     ≡1  ●0  ◎0  ◐0  ○1  ✕0
+    ⓘ                        — ▾
+    project
+    ┃ ○ claude
+        Waiting for prompt…
+    ");
+}
+
 #[test]
 fn snapshot_secondary_header_long_repo_filter_truncated() {
     let pane = make_pane(AgentType::Claude, PaneStatus::Idle);

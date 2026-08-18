@@ -15,11 +15,16 @@ pub(super) fn init_state(tmux_pane: String) -> AppState {
     state.theme = ui::colors::ColorTheme::from_tmux();
     state.icons = ui::icons::StatusIcons::from_tmux();
     state.bottom_panel_height = ui::bottom_panel_height_from_tmux();
+    state.bottom_panel_enabled = ui::bottom_enabled_from_tmux();
     state.pet_enabled = ui::pet_enabled_from_tmux();
     state.global.load_from_tmux();
     state.refresh();
 
-    super::render::refresh_git_for_focused_pane(&mut state);
+    // Git data only ever reaches the Git tab, so skip the (blocking)
+    // startup fetch when the bottom panel is off.
+    if state.bottom_panel_visible() {
+        super::render::refresh_git_for_focused_pane(&mut state);
+    }
 
     // Resolve the installed Claude Code plugin status once at startup,
     // matching the version_notice pattern. Restart the sidebar after a

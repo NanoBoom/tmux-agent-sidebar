@@ -126,11 +126,12 @@ Per-pane file-based state:
 │  sessions.names map populated by session_poll_loop          │
 ├─────────────────────────────────────────────────────────────┤
 │  Once at startup                                             │
-│  theme, bottom_panel_height, notices.claude_plugin_*,       │
+│  theme, bottom_panel_height, bottom_panel_enabled,          │
+│  notices.claude_plugin_*,                                   │
 │  notices.claude_settings_has_residual_hooks,                │
 │  notices.claude_plugin_notice, notices.missing_hook_groups  │
 ├─────────────────────────────────────────────────────────────┤
-│  Every 2s (git background thread)                           │
+│  Every 2s (git background thread, Git tab only)             │
 │  git (branch, diff, ahead/behind, PR)                       │
 ├─────────────────────────────────────────────────────────────┤
 │  On SIGUSR1 (tmux focus change)                             │

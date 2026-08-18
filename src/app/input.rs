@@ -22,20 +22,25 @@ pub(super) fn handle_event(
         Event::Key(key) => handle_key_event(key, state, git_tab_active),
         Event::Mouse(mouse) => {
             let term_height = terminal.size().map(|s| s.height).unwrap_or(0);
-            let bottom_h = state.bottom_panel_height;
+            // A disabled panel occupies no rows, so every coordinate below
+            // belongs to the pane list.
+            let bottom_h = if state.bottom_panel_visible() {
+                state.bottom_panel_height
+            } else {
+                0
+            };
             match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
                     let bottom_start = term_height.saturating_sub(bottom_h);
                     if mouse.row < bottom_start {
                         state.handle_mouse_click(mouse.row, mouse.column);
-                    } else if mouse.row == bottom_start {
+                    } else if mouse.row == bottom_start && bottom_h > 0 {
                         state.handle_bottom_tab_click(mouse.column);
                         // Keep the background git poller in sync immediately — the
                         // keyboard `BackTab` path does the same update. Without this,
                         // clicking into Git Status leaves polling disabled until the
                         // next refresh tick and the tab renders stale data.
-                        git_tab_active
-                            .store(state.bottom_tab == BottomTab::GitStatus, Ordering::Relaxed);
+                        git_tab_active.store(state.git_polling_wanted(), Ordering::Relaxed);
                     }
                 }
                 MouseEventKind::ScrollDown => {
@@ -158,8 +163,10 @@ pub(super) fn handle_key_event(
             state.rebuild_row_targets();
         }
         KeyCode::BackTab => {
-            state.next_bottom_tab();
-            git_tab_active.store(state.bottom_tab == BottomTab::GitStatus, Ordering::Relaxed);
+            if state.bottom_panel_visible() {
+                state.next_bottom_tab();
+                git_tab_active.store(state.git_polling_wanted(), Ordering::Relaxed);
+            }
         }
         _ => {}
     }
@@ -174,7 +181,10 @@ fn pane_nav_down(state: &mut AppState) {
         Focus::Panes => {
             if state.move_pane_selection(1) {
                 state.global.queue_cursor_save();
-            } else {
+            } else if state.bottom_panel_visible() {
+                // Without the guard, falling off the last row would move focus
+                // into a panel that is not on screen, leaving `j`/`k` scrolling
+                // something invisible until the user presses Esc.
                 state.focus_state.focus = Focus::ActivityLog;
             }
         }

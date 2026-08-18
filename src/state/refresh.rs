@@ -137,9 +137,16 @@ impl AppState {
     }
 
     fn refresh_activity_data(&mut self) {
-        self.refresh_activity_log();
+        // `activity.entries` and `bottom_tab` are consumed exclusively by the
+        // bottom panel, so both are dead work while it is off. Task progress
+        // is not — it drives the progress bar on the pane rows.
+        if self.bottom_panel_visible() {
+            self.refresh_activity_log();
+        }
         self.refresh_task_progress();
-        self.auto_switch_tab();
+        if self.bottom_panel_visible() {
+            self.auto_switch_tab();
+        }
     }
 
     /// Fast refresh: tmux state + activity log (called every 1s).
@@ -845,6 +852,71 @@ mod tests {
                 .collect(),
         }];
         state
+    }
+
+    // ─── refresh_activity_data gating ───────────────────────────────
+
+    /// Seed an activity log for `pane_id` and run one `refresh_activity_data`
+    /// pass with the bottom panel enabled or not. Returns the entry count and
+    /// the resulting tab so callers can assert on both producers at once.
+    fn activity_data_pass(pane_id: &str, bottom_enabled: bool) -> (usize, super::super::BottomTab) {
+        let mut state = state_with_panes(vec![test_pane(pane_id)]);
+        state.bottom_panel_enabled = bottom_enabled;
+        // Focus a non-agent pane so `auto_switch_tab` would move the tab off
+        // its `Activity` default if it ran at all.
+        state.focus_state.focused_pane_id = Some(pane_id.to_string());
+        state.repo_groups.clear();
+
+        let log_path = activity::log_file_path(pane_id);
+        std::fs::write(&log_path, "10:00|Read|src/main.rs\n").unwrap();
+
+        state.refresh_activity_data();
+
+        std::fs::remove_file(&log_path).ok();
+        (state.activity.entries.len(), state.bottom_tab)
+    }
+
+    #[test]
+    fn refresh_activity_data_feeds_panel_when_enabled() {
+        let (entries, tab) = activity_data_pass("%ACT_ON", true);
+        assert_eq!(entries, 1, "activity log must be parsed for the panel");
+        assert_eq!(
+            tab,
+            super::super::BottomTab::GitStatus,
+            "auto_switch_tab must run for a non-agent pane"
+        );
+    }
+
+    #[test]
+    fn refresh_activity_data_skips_producers_when_bottom_disabled() {
+        let (entries, tab) = activity_data_pass("%ACT_OFF", false);
+        assert_eq!(
+            entries, 0,
+            "activity log must not be read when the panel is off"
+        );
+        assert_eq!(
+            tab,
+            super::super::BottomTab::Activity,
+            "auto_switch_tab must not run when the panel is off"
+        );
+    }
+
+    #[test]
+    fn refresh_task_progress_still_runs_when_bottom_disabled() {
+        // Task progress renders on the pane rows, not the bottom panel, so it
+        // must survive the gate that silences the other two producers.
+        let pane_id = "%TASK_BOTTOM_OFF";
+        let mut state = state_with_panes(vec![test_pane(pane_id)]);
+        state.bottom_panel_enabled = false;
+
+        let log_path = activity::log_file_path(pane_id);
+        std::fs::write(&log_path, "10:00|TaskCreate|#1 A\n10:01|TaskCreate|#2 B\n").unwrap();
+
+        state.refresh_activity_data();
+
+        let progress = state.pane_task_progress(pane_id).cloned();
+        std::fs::remove_file(&log_path).ok();
+        assert_eq!(progress.map(|p| p.total()), Some(2));
     }
 
     #[test]

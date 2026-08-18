@@ -22,6 +22,16 @@ pub const BOTTOM_PANEL_HEIGHT: u16 = 20;
 /// never overdraw the pane list above or the bottom panel's border below.
 pub const PET_SCENE_HEIGHT: u16 = 5;
 
+/// Read a boolean tmux option, falling back to `default` when it is unset.
+/// Accepts `on`/`off`, `true`/`false`, `1`/`0`, `yes`/`no` (case-insensitive);
+/// anything else reads as `false`.
+fn bool_option(opts: &HashMap<String, String>, key: &str, default: bool) -> bool {
+    opts.get(key)
+        .map(|s| s.trim().to_ascii_lowercase())
+        .map(|s| matches!(s.as_str(), "on" | "true" | "1" | "yes"))
+        .unwrap_or(default)
+}
+
 /// Read `@sidebar_bottom_height` from tmux global options, falling back to the default.
 /// A value of 0 hides the bottom panel entirely.
 pub fn bottom_panel_height_from_options(opts: &HashMap<String, String>) -> u16 {
@@ -37,13 +47,23 @@ pub fn bottom_panel_height_from_tmux() -> u16 {
     bottom_panel_height_from_options(&opts)
 }
 
+/// Read `@sidebar_bottom` from tmux global options, defaulting to `true` (on).
+/// Turning it off skips both the panel's rendering and the background work
+/// that only feeds it (activity log reads, tab auto-switching, git polling).
+/// `@sidebar_bottom_height 0` remains an equivalent way to disable the panel.
+pub fn bottom_enabled_from_options(opts: &HashMap<String, String>) -> bool {
+    bool_option(opts, tmux::SIDEBAR_BOTTOM, true)
+}
+
+pub fn bottom_enabled_from_tmux() -> bool {
+    let opts = tmux::get_all_global_options();
+    bottom_enabled_from_options(&opts)
+}
+
 /// Read `@sidebar_pet` from tmux global options, defaulting to `false` (off).
 /// Accepts `on`/`off`, `true`/`false`, `1`/`0` (case-insensitive).
 pub fn pet_enabled_from_options(opts: &HashMap<String, String>) -> bool {
-    opts.get(tmux::SIDEBAR_PET)
-        .map(|s| s.trim().to_ascii_lowercase())
-        .map(|s| matches!(s.as_str(), "on" | "true" | "1" | "yes"))
-        .unwrap_or(false)
+    bool_option(opts, tmux::SIDEBAR_PET, false)
 }
 
 pub fn pet_enabled_from_tmux() -> bool {
@@ -57,7 +77,11 @@ pub fn draw(frame: &mut Frame, state: &mut AppState) {
     state.layout.hyperlink_overlays.clear();
     let area = frame.area();
 
-    let bot_h = state.bottom_panel_height;
+    let bot_h = if state.bottom_panel_visible() {
+        state.bottom_panel_height
+    } else {
+        0
+    };
     let divider_h = if bot_h > 0 && state.pet_enabled {
         PET_SCENE_HEIGHT
     } else {
@@ -132,6 +156,34 @@ mod tests {
     fn bottom_height_falls_back_on_empty_value() {
         let opts = opts_with(tmux::SIDEBAR_BOTTOM_HEIGHT, "");
         assert_eq!(bottom_panel_height_from_options(&opts), BOTTOM_PANEL_HEIGHT);
+    }
+
+    #[test]
+    fn bottom_enabled_defaults_on_when_option_missing() {
+        let opts = HashMap::new();
+        assert!(bottom_enabled_from_options(&opts));
+    }
+
+    #[test]
+    fn bottom_enabled_when_truthy() {
+        for value in ["on", "ON", "true", "1", "yes", " on "] {
+            let opts = opts_with(tmux::SIDEBAR_BOTTOM, value);
+            assert!(
+                bottom_enabled_from_options(&opts),
+                "expected {value} to enable"
+            );
+        }
+    }
+
+    #[test]
+    fn bottom_disabled_when_falsy() {
+        for value in ["off", "OFF", "false", "0", "no", ""] {
+            let opts = opts_with(tmux::SIDEBAR_BOTTOM, value);
+            assert!(
+                !bottom_enabled_from_options(&opts),
+                "expected {value} to disable"
+            );
+        }
     }
 
     #[test]

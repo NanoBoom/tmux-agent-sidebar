@@ -125,6 +125,14 @@ impl AppState {
             .any(|g| g.panes.iter().any(|(p, _)| p.pane_id == *fid))
     }
 
+    /// Whether the background git poller should be fetching right now.
+    ///
+    /// `GitData` is rendered only by the Git tab, so polling is pointless
+    /// both when another tab is up and when the panel itself is off.
+    pub fn git_polling_wanted(&self) -> bool {
+        self.bottom_panel_visible() && self.bottom_tab == BottomTab::GitStatus
+    }
+
     pub fn next_bottom_tab(&mut self) {
         self.bottom_tab = match self.bottom_tab {
             BottomTab::Activity => BottomTab::GitStatus,
@@ -204,6 +212,44 @@ mod tests {
         state.repo_groups = repo_groups;
         state.focus_state.focused_pane_id = focused_pane_id.map(str::to_string);
         state
+    }
+
+    // ─── bottom_panel_visible / git_polling_wanted ───────────────
+
+    #[test]
+    fn bottom_panel_visible_by_default() {
+        let state = AppState::new("%99".into());
+        assert!(state.bottom_panel_visible());
+    }
+
+    #[test]
+    fn bottom_panel_hidden_when_disabled_or_zero_height() {
+        let mut state = AppState::new("%99".into());
+        state.bottom_panel_enabled = false;
+        assert!(!state.bottom_panel_visible(), "@sidebar_bottom off");
+
+        state.bottom_panel_enabled = true;
+        state.bottom_panel_height = 0;
+        assert!(!state.bottom_panel_visible(), "@sidebar_bottom_height 0");
+    }
+
+    #[test]
+    fn git_polling_wanted_only_on_visible_git_tab() {
+        let mut state = AppState::new("%99".into());
+        state.bottom_tab = BottomTab::GitStatus;
+        assert!(state.git_polling_wanted());
+
+        state.bottom_tab = BottomTab::Activity;
+        assert!(
+            !state.git_polling_wanted(),
+            "Activity tab needs no git data"
+        );
+
+        // The expensive case: the panel is off, so the poller must stay idle
+        // no matter which tab the state happens to hold.
+        state.bottom_tab = BottomTab::GitStatus;
+        state.bottom_panel_enabled = false;
+        assert!(!state.git_polling_wanted());
     }
 
     // ─── focused_pane_is_agent ───────────────────────────────────
