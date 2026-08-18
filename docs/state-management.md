@@ -226,16 +226,56 @@ needed. On a confirmed hit the sidebar runs `kill-pane` on itself and
 wired to the same SIGUSR1 wakeup as the focus hooks, so prefix + x is noticed
 immediately rather than up to 1s late.
 
-**Debounce** (`app/self_close.rs`) — one sighting is not enough to act on.
-`RefreshOutcome::self_close_eligible` is an observation; `SelfCloseDebounce`
-turns it into a decision only after the condition has held for
-`SELF_CLOSE_GRACE` (250ms). Without it the SIGUSR1 wakeup makes the sidebar
-react within milliseconds, so the ordinary "kill a pane, then create a
-replacement" sequence — two separate `tmux` invocations, tens of milliseconds
-apart — gets caught mid-flight and the user loses the whole window. While a
-close is pending the event loop polls again after the grace period instead of
-waiting out the 1s tick, so confirmation costs one extra query and only in the
-rare tick where the sidebar looks alone.
+**Why there is no debounce** — `RefreshOutcome::self_close` is acted on the
+first time it comes back true. An earlier revision required the condition to
+hold for a 250ms grace period first, to protect a "kill a pane, then create a
+replacement" sequence: two separate `tmux` invocations, tens of milliseconds
+apart, whose midpoint looks exactly like an abandoned window. Killing the
+sidebar there destroys the window and the follow-up `split-window` fails, so
+the user loses the whole workspace.
+
+It was dropped because the cost was disproportionate to what it bought. What
+decides the race is simply *when the sidebar pulls the trigger*, since a
+respawn that lands before that is safe and one that lands after is not:
+
+| | trigger fires at | close latency (`prefix + x` → window gone) |
+| --- | --- | --- |
+| 250ms grace | kill + ~265ms | ~320ms |
+| no grace | kill + one refresh | ~50ms, ~150ms on the 10s port-scan tick |
+
+The grace period never made the race *correct* — a respawn slower than 265ms
+lost the window anyway. It bought a wider bet, not a guarantee, and charged
+every ordinary close 250ms for it. Measured respawn gaps on the current build
+(5 runs each): ≤15ms always intact, ≥100ms always loses the window, 20–60ms is
+the jitter band where the outcome depends on how much work that refresh tick
+had to do. So the safe gap dropped from ~265ms to ~15ms, not to zero, but it
+is genuinely small — do not read "no debounce" as "there is still some slack".
+
+Nothing in this repository does kill-then-respawn (`cli/toggle.rs` kills
+sidebars, `app.rs` kills only itself), so the exposure is limited to external
+scripts that rebuild a pane within ~15ms of destroying the last one. tmux's own
+`respawn-pane` does not destroy the pane and never enters this path.
+
+What did survive the removal is a **re-read**, which is not the same thing as a
+wait. `refresh()` samples the pane counts in its first call and then spends the
+rest of the tick on `list-panes -a`, the process scan and the activity logs, so
+`RefreshOutcome::self_close` is tens to hundreds of ms out of date by the time
+the event loop sees it. Acting on that stale sample lets a pane created
+mid-refresh lose its sidebar (the window itself survives — `kill-pane` on
+ourselves only destroys the window when we really are the last pane). One
+`display-message` before the kill moves the decision from the start of the
+refresh to its end; with a respawn landing in between (35ms gap, 6 runs) that
+took the fully-intact outcome from 1/6 to 5/6. It narrows the window rather
+than closing it — at a 50ms gap, where the respawn and the re-read collide,
+the two builds are indistinguishable. Costs ~5ms, only on a tick that already
+wants to close.
+
+If the trade-off ever needs revisiting, reinstate the wait as an absolute
+deadline (`alone_since + GRACE`), not a relative one. The original made the
+event loop's next-refresh countdown relative to `last_refresh`, so any SIGUSR1
+arriving inside the grace window pushed the confirming tick out by a further
+full grace period — a wakeup at 240ms delayed the close to ~550ms, and the
+focus hooks fire exactly such wakeups.
 
 Both paths share `tmux::session_safe_to_close()`: tearing down the last window
 of a session destroys the session and drops every attached client, so that is
