@@ -234,6 +234,21 @@ impl AppState {
             self.close_remove_confirm();
             return;
         }
+        if self.is_open_worktree_open() {
+            if let Some(area) = self.open_worktree_popup_area()
+                && point_in_rect(row, col, area)
+            {
+                // Skip the top border / title row, same as the repo
+                // popup — without the guard `saturating_sub(1)` folds a
+                // title click into row 0.
+                if row > area.y {
+                    self.open_worktree_select_row((row - area.y - 1) as usize);
+                }
+                return;
+            }
+            self.close_open_worktree();
+            return;
+        }
 
         if row == 0 {
             self.handle_filter_click(col);
@@ -257,7 +272,7 @@ impl AppState {
             return;
         }
 
-        // Check the red `×` remove markers next to spawn-created branches.
+        // Check the red `×` remove markers next to sidebar-created branches.
         if let Some(pane_id) = self
             .layout
             .spawn_remove_targets

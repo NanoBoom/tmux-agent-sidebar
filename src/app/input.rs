@@ -81,6 +81,24 @@ pub(super) fn handle_key_event(
         }
         return true;
     }
+    if state.is_open_worktree_open() {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Esc => state.open_worktree_back(),
+            KeyCode::Enter => state.confirm_open_worktree(),
+            // `open_worktree_nav` dispatches on the current step: list
+            // movement in `Pick`, field movement in `Configure`. There
+            // is no text field in either step, so `j`/`k` are safe.
+            KeyCode::Char('j') | KeyCode::Down | KeyCode::Tab => state.open_worktree_nav(1),
+            KeyCode::Char('n') if ctrl => state.open_worktree_nav(1),
+            KeyCode::Char('k') | KeyCode::Up | KeyCode::BackTab => state.open_worktree_nav(-1),
+            KeyCode::Char('p') if ctrl => state.open_worktree_nav(-1),
+            KeyCode::Left => state.open_worktree_cycle(-1),
+            KeyCode::Right => state.open_worktree_cycle(1),
+            _ => {}
+        }
+        return true;
+    }
     if state.is_remove_confirm_open() {
         match key.code {
             KeyCode::Esc | KeyCode::Char('n') => state.close_remove_confirm(),
@@ -140,6 +158,11 @@ pub(super) fn handle_key_event(
         KeyCode::Char('n') => {
             if state.focus_state.focus == Focus::Panes {
                 state.open_spawn_input_from_selection();
+            }
+        }
+        KeyCode::Char('o') => {
+            if state.focus_state.focus == Focus::Panes {
+                state.open_worktree_from_selection();
             }
         }
         KeyCode::Char('x') => {
@@ -225,7 +248,7 @@ fn repo_popup_nav_up(state: &mut AppState) {
 mod tests {
     use super::*;
     use crate::group::RepoGroup;
-    use crate::state::RowTarget;
+    use crate::state::{AgentPick, OpenField, OpenStep, OpenWorktreeRow, PopupState, RowTarget};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -340,6 +363,115 @@ mod tests {
         // Past the last entry the popup nav helper is a no-op.
         handle_key_event(ctrl_key('n'), &mut state, &flag);
         assert_eq!(state.repo_popup_selected(), 2);
+    }
+
+    // ─── Open worktree (`o`) ─────────────────────────────────────
+
+    fn state_with_open_picker() -> AppState {
+        let mut state = state_with_three_panes();
+        state.popup = PopupState::OpenWorktree {
+            target_repo_root: "/repo".into(),
+            rows: vec![
+                OpenWorktreeRow {
+                    path: "/repo".into(),
+                    branch: "main".into(),
+                    label: "main".into(),
+                    in_use: false,
+                },
+                OpenWorktreeRow {
+                    path: "/repo/.wt/a".into(),
+                    branch: "agent/a".into(),
+                    label: "agent/a".into(),
+                    in_use: false,
+                },
+                OpenWorktreeRow {
+                    path: "/repo/.wt/b".into(),
+                    branch: "agent/b".into(),
+                    label: "agent/b".into(),
+                    in_use: false,
+                },
+            ],
+            selected: 0,
+            scroll: 0,
+            step: OpenStep::Pick,
+            pick: AgentPick::default(),
+            field: OpenField::default(),
+            anchor_y: None,
+            error: None,
+            area: None,
+        };
+        state
+    }
+
+    #[test]
+    fn bare_o_in_panes_focus_reaches_the_open_flow() {
+        // A bare AppState has no repo groups, so the entry point takes
+        // its "no pane selected" guard — asserting on the flash proves
+        // the key routed there. Mirrors `bare_n_does_not_move_selection`.
+        let mut state = AppState::new("%99".into());
+        state.focus_state.focus = Focus::Panes;
+        let flag = AtomicBool::new(false);
+        handle_key_event(key(KeyCode::Char('o')), &mut state, &flag);
+        assert_eq!(
+            state.take_flash().as_deref(),
+            Some("open: no pane selected")
+        );
+    }
+
+    #[test]
+    fn bare_o_is_inert_outside_panes_focus() {
+        let mut state = AppState::new("%99".into());
+        state.focus_state.focus = Focus::Filter;
+        let flag = AtomicBool::new(false);
+        handle_key_event(key(KeyCode::Char('o')), &mut state, &flag);
+        assert!(state.take_flash().is_none());
+        assert!(!state.is_open_worktree_open());
+    }
+
+    #[test]
+    fn open_picker_navigation_does_not_leak_to_pane_selection() {
+        let mut state = state_with_open_picker();
+        let flag = AtomicBool::new(false);
+
+        for k in [key(KeyCode::Char('j')), ctrl_key('n'), key(KeyCode::Down)] {
+            handle_key_event(k, &mut state, &flag);
+        }
+        assert_eq!(state.open_worktree_selected(), 2);
+        assert_eq!(
+            state.global.selected_pane_row, 0,
+            "picker navigation must not move the pane list behind the modal"
+        );
+
+        for k in [key(KeyCode::Char('k')), ctrl_key('p'), key(KeyCode::Up)] {
+            handle_key_event(k, &mut state, &flag);
+        }
+        assert_eq!(state.open_worktree_selected(), 0);
+        assert_eq!(state.global.selected_pane_row, 0);
+    }
+
+    #[test]
+    fn open_picker_enter_advances_and_esc_walks_back() {
+        let mut state = state_with_open_picker();
+        let flag = AtomicBool::new(false);
+
+        handle_key_event(key(KeyCode::Enter), &mut state, &flag);
+        assert_eq!(state.open_worktree_step(), Some(OpenStep::Configure));
+
+        // Right cycles the focused agent field; Tab moves to MODE.
+        handle_key_event(key(KeyCode::Right), &mut state, &flag);
+        handle_key_event(key(KeyCode::Tab), &mut state, &flag);
+        match &state.popup {
+            PopupState::OpenWorktree { pick, field, .. } => {
+                assert_eq!(pick.agent(), "codex");
+                assert_eq!(*field, OpenField::Mode);
+            }
+            _ => panic!("popup must stay open"),
+        }
+
+        handle_key_event(key(KeyCode::Esc), &mut state, &flag);
+        assert_eq!(state.open_worktree_step(), Some(OpenStep::Pick));
+        handle_key_event(key(KeyCode::Esc), &mut state, &flag);
+        assert!(!state.is_open_worktree_open());
     }
 
     #[test]

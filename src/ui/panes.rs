@@ -1,5 +1,6 @@
 mod click_targets;
 mod filter_bar;
+mod open_worktree;
 mod popups;
 mod row;
 mod row_collector;
@@ -111,8 +112,7 @@ const EXP_ERROR_Y: u16 = 10;
 pub(super) fn render_spawn_input_popup(frame: &mut Frame, state: &mut AppState, area: Rect) {
     let PopupState::SpawnInput {
         input,
-        agent_idx,
-        mode_idx,
+        pick,
         field,
         anchor_y,
         error,
@@ -125,14 +125,8 @@ pub(super) fn render_spawn_input_popup(frame: &mut Frame, state: &mut AppState, 
     let field = *field;
     let anchor_y = *anchor_y;
     let error = error.clone();
-    let agent = crate::worktree::AGENTS
-        .get(*agent_idx)
-        .copied()
-        .unwrap_or("");
-    let mode = crate::worktree::modes_for(agent)
-        .get(*mode_idx)
-        .copied()
-        .unwrap_or("");
+    let agent = pick.agent();
+    let mode = pick.mode();
     let theme = &state.theme;
 
     let popup_width = area.width.min(32).max(area.width.min(14));

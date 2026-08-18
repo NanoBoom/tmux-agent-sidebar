@@ -1,5 +1,77 @@
 use super::AppState;
 
+pub(crate) mod open_worktree;
+
+/// Agent + permission-mode selection shared by the spawn and open
+/// worktree modals. `agent_idx` indexes [`crate::worktree::AGENTS`];
+/// `mode_idx` indexes [`crate::worktree::modes_for`] for that agent.
+/// Extracted so the non-trivial cycle rules (agent wrap resets the mode,
+/// mode wraps against the agent-specific list) have one source of truth.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AgentPick {
+    pub agent_idx: usize,
+    pub mode_idx: usize,
+}
+
+impl AgentPick {
+    /// Selected agent, or `""` when `agent_idx` is out of range.
+    pub fn agent(&self) -> &'static str {
+        crate::worktree::AGENTS
+            .get(self.agent_idx)
+            .copied()
+            .unwrap_or("")
+    }
+
+    /// Selected permission mode, or `""` when `mode_idx` is out of range.
+    pub fn mode(&self) -> &'static str {
+        crate::worktree::modes_for(self.agent())
+            .get(self.mode_idx)
+            .copied()
+            .unwrap_or("")
+    }
+
+    /// Move `agent_idx` by `delta`, wrapping. The mode list is
+    /// agent-specific, so the mode selection resets to the first entry.
+    pub fn cycle_agent(&mut self, delta: isize) {
+        let len = crate::worktree::AGENTS.len() as isize;
+        if len == 0 {
+            return;
+        }
+        self.agent_idx = ((self.agent_idx as isize + delta).rem_euclid(len)) as usize;
+        self.mode_idx = 0;
+    }
+
+    /// Move `mode_idx` by `delta`, wrapping within the current agent's
+    /// mode list. No-op when that list is empty.
+    pub fn cycle_mode(&mut self, delta: isize) {
+        let len = crate::worktree::modes_for(self.agent()).len() as isize;
+        if len == 0 {
+            return;
+        }
+        self.mode_idx = ((self.mode_idx as isize + delta).rem_euclid(len)) as usize;
+    }
+
+    /// Agent name for launching, falling back to the configured default
+    /// rather than `""` so a corrupt index still produces a runnable
+    /// command.
+    pub fn agent_or_default(&self) -> String {
+        crate::worktree::AGENTS
+            .get(self.agent_idx)
+            .copied()
+            .unwrap_or(crate::worktree::DEFAULT_AGENT)
+            .to_string()
+    }
+
+    /// Mode name for launching, falling back to the configured default.
+    pub fn mode_or_default(&self, agent: &str) -> String {
+        crate::worktree::modes_for(agent)
+            .get(self.mode_idx)
+            .copied()
+            .unwrap_or(crate::worktree::DEFAULT_MODE)
+            .to_string()
+    }
+}
+
 /// Focus target inside the spawn input popup. Tab / Shift+Tab / arrow
 /// keys cycle through these in order; only `Task` accepts text input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -8,6 +80,56 @@ pub enum SpawnField {
     Task,
     Agent,
     Mode,
+}
+
+/// Focus target inside the open-worktree modal's second step. There is
+/// no text input there, so this is deliberately not [`SpawnField`] —
+/// reusing that enum would make the unreachable `Task` variant
+/// representable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OpenField {
+    #[default]
+    Agent,
+    Mode,
+}
+
+impl OpenField {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Agent => Self::Mode,
+            Self::Mode => Self::Agent,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        // Two variants, so prev and next coincide; spelled out
+        // separately to keep the call sites symmetric with SpawnField.
+        self.next()
+    }
+}
+
+/// Which half of the open-worktree modal is showing. One popup variant
+/// holds both so the worktree list survives the step transition —
+/// `Esc` from `Configure` returns to `Pick` without re-running
+/// `git worktree list`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenStep {
+    Pick,
+    Configure,
+}
+
+/// Row shown in the open-worktree picker: an existing worktree plus the
+/// sidebar-local "is a pane already running here" flag.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenWorktreeRow {
+    pub path: String,
+    /// Short branch name. Empty for a detached checkout — kept separate
+    /// from `label` so the branch marker written on the new window is
+    /// never a display string.
+    pub branch: String,
+    /// What the picker renders: the branch, or `(detached <sha7>)`.
+    pub label: String,
+    pub in_use: bool,
 }
 
 impl SpawnField {
@@ -28,6 +150,25 @@ impl SpawnField {
     }
 }
 
+/// What the close-pane modal puts in its title. This is the string the
+/// user reads before pressing `y`, and `y` runs `git branch -D` on
+/// [`SpawnMarkers::branch`] — so it has to be that branch, not the
+/// worktree directory name. For a spawned worktree the two only differ
+/// by the `agent/` prefix, but an opened one can sit in a directory
+/// whose name has nothing to do with its branch.
+///
+/// Falls back to the directory basename for a detached checkout, which
+/// has no branch to name.
+fn remove_confirm_label(markers: &crate::worktree::SpawnMarkers) -> String {
+    if !markers.branch.is_empty() {
+        return markers.branch.clone();
+    }
+    std::path::Path::new(&markers.worktree_path)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 /// At-most-one popup state for the sidebar. The enum variant encodes
 /// both which popup is open and its per-popup data, so the "only one
 /// popup open at a time" invariant is checked by the type system.
@@ -44,15 +185,13 @@ pub enum PopupState {
     },
     /// Modal text input shown when the user presses `n` (or clicks `+`)
     /// to spawn a new worktree. `target_repo` / `target_repo_root` pin
-    /// the spawn target; `agent_idx` / `mode_idx` index into
-    /// [`crate::worktree::AGENTS`] / [`crate::worktree::modes_for`] so
-    /// arrow keys can cycle the user's agent and permission-mode picks.
+    /// the spawn target; `pick` holds the user's agent and
+    /// permission-mode selection.
     SpawnInput {
         input: String,
         target_repo: String,
         target_repo_root: String,
-        agent_idx: usize,
-        mode_idx: usize,
+        pick: AgentPick,
         field: SpawnField,
         /// Screen Y of the repo header row that owns the `+` button
         /// this modal was opened from. Renderer anchors the popup just
@@ -65,11 +204,32 @@ pub enum PopupState {
         area: Option<ratatui::layout::Rect>,
     },
     /// Confirmation prompt shown when the user presses `x` on a
-    /// spawn-created pane. `pane_id` feeds `worktree::remove`; `branch`
-    /// is shown in the modal title.
+    /// sidebar-created pane (`n` or `o`). `pane_id` feeds
+    /// `worktree::remove`; `branch` is the modal title and names exactly
+    /// what `[y]` will `git branch -D` — see `remove_confirm_label`.
     RemoveConfirm {
         pane_id: String,
         branch: String,
+        error: Option<String>,
+        area: Option<ratatui::layout::Rect>,
+    },
+    /// Two-step modal shown when the user presses `o`: pick one of the
+    /// repository's existing worktrees, then pick the agent and
+    /// permission mode to launch in it. Both steps live in one variant
+    /// so `rows` survives the transition (see [`OpenStep`]).
+    OpenWorktree {
+        target_repo_root: String,
+        rows: Vec<OpenWorktreeRow>,
+        selected: usize,
+        /// First visible row — the list scrolls when it exceeds the
+        /// popup's inner height.
+        scroll: usize,
+        step: OpenStep,
+        pick: AgentPick,
+        field: OpenField,
+        /// Screen Y of the repo header row this modal was opened from,
+        /// so `o` and `n` modals appear in the same place.
+        anchor_y: Option<u16>,
         error: Option<String>,
         area: Option<ratatui::layout::Rect>,
     },
@@ -96,6 +256,12 @@ impl PopupState {
 
     pub fn set_remove_confirm_area(&mut self, rect: Option<ratatui::layout::Rect>) {
         if let Self::RemoveConfirm { area, .. } = self {
+            *area = rect;
+        }
+    }
+
+    pub fn set_open_worktree_area(&mut self, rect: Option<ratatui::layout::Rect>) {
+        if let Self::OpenWorktree { area, .. } = self {
             *area = rect;
         }
     }
@@ -214,8 +380,7 @@ impl AppState {
             input: String::new(),
             target_repo: repo_name,
             target_repo_root: repo_root,
-            agent_idx: 0,
-            mode_idx: 0,
+            pick: AgentPick::default(),
             field: SpawnField::Task,
             anchor_y,
             error: None,
@@ -281,33 +446,19 @@ impl AppState {
     /// the task input field so typing isn't interfered with.
     pub fn spawn_input_cycle(&mut self, delta: isize) {
         let PopupState::SpawnInput {
-            field,
-            agent_idx,
-            mode_idx,
-            error,
-            ..
+            field, pick, error, ..
         } = &mut self.popup
         else {
             return;
         };
         match *field {
             SpawnField::Agent => {
-                let len = crate::worktree::AGENTS.len() as isize;
-                *agent_idx = ((*agent_idx as isize + delta).rem_euclid(len)) as usize;
-                // Mode list is agent-specific.
-                *mode_idx = 0;
+                pick.cycle_agent(delta);
                 *error = None;
             }
             SpawnField::Mode => {
-                let agent = crate::worktree::AGENTS
-                    .get(*agent_idx)
-                    .copied()
-                    .unwrap_or("");
-                let len = crate::worktree::modes_for(agent).len() as isize;
-                if len > 0 {
-                    *mode_idx = ((*mode_idx as isize + delta).rem_euclid(len)) as usize;
-                    *error = None;
-                }
+                pick.cycle_mode(delta);
+                *error = None;
             }
             SpawnField::Task => {}
         }
@@ -362,8 +513,7 @@ impl AppState {
         let PopupState::SpawnInput {
             input,
             target_repo_root,
-            agent_idx,
-            mode_idx,
+            pick,
             ..
         } = &self.popup
         else {
@@ -374,16 +524,8 @@ impl AppState {
             self.set_spawn_error("name is empty");
             return;
         }
-        let agent = crate::worktree::AGENTS
-            .get(*agent_idx)
-            .copied()
-            .unwrap_or(crate::worktree::DEFAULT_AGENT)
-            .to_string();
-        let mode = crate::worktree::modes_for(&agent)
-            .get(*mode_idx)
-            .copied()
-            .unwrap_or(crate::worktree::DEFAULT_MODE)
-            .to_string();
+        let agent = pick.agent_or_default();
+        let mode = pick.mode_or_default(&agent);
         let repo_root = std::path::PathBuf::from(target_repo_root.clone());
 
         let Some(session) = crate::tmux::pane_session_name(&self.tmux_pane) else {
@@ -437,16 +579,12 @@ impl AppState {
     pub fn open_remove_confirm_for_pane(&mut self, pane_id: String) {
         let markers = crate::worktree::read_spawn_markers(&pane_id);
         if !markers.is_spawned() {
-            self.set_flash("remove: selected pane was not spawned by sidebar");
+            self.set_flash("remove: selected pane was not created by sidebar");
             return;
         }
-        let branch = std::path::Path::new(&markers.worktree_path)
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
         self.popup = PopupState::RemoveConfirm {
             pane_id,
-            branch,
+            branch: remove_confirm_label(&markers),
             error: None,
             area: None,
         };
@@ -510,6 +648,92 @@ mod tests {
         assert_eq!(SpawnField::Mode.prev(), SpawnField::Agent);
     }
 
+    // ─── OpenField cycle ─────────────────────────────────────────────
+
+    #[test]
+    fn open_field_next_and_prev_cycle() {
+        assert_eq!(OpenField::default(), OpenField::Agent);
+        assert_eq!(OpenField::Agent.next(), OpenField::Mode);
+        assert_eq!(OpenField::Mode.next(), OpenField::Agent);
+        assert_eq!(OpenField::Agent.prev(), OpenField::Mode);
+        assert_eq!(OpenField::Mode.prev(), OpenField::Agent);
+    }
+
+    // ─── AgentPick ───────────────────────────────────────────────────
+
+    #[test]
+    fn agent_pick_defaults_to_first_agent_and_mode() {
+        let pick = AgentPick::default();
+        assert_eq!(pick.agent(), crate::worktree::AGENTS[0]);
+        assert_eq!(pick.mode(), crate::worktree::modes_for(pick.agent())[0]);
+    }
+
+    #[test]
+    fn agent_pick_cycle_agent_wraps_both_directions() {
+        let len = crate::worktree::AGENTS.len();
+        let mut pick = AgentPick::default();
+        for i in 1..=len {
+            pick.cycle_agent(1);
+            assert_eq!(pick.agent_idx, i % len);
+        }
+        assert_eq!(pick.agent_idx, 0, "forward cycle wraps to the start");
+
+        pick.cycle_agent(-1);
+        assert_eq!(pick.agent_idx, len - 1, "backward cycle wraps to the end");
+    }
+
+    #[test]
+    fn agent_pick_cycle_agent_resets_mode() {
+        let mut pick = AgentPick {
+            agent_idx: 0,
+            mode_idx: 3,
+        };
+        pick.cycle_agent(1);
+        assert_eq!(
+            pick.mode_idx, 0,
+            "the mode list is agent-specific, so a stale index must not survive"
+        );
+    }
+
+    #[test]
+    fn agent_pick_cycle_mode_wraps_within_current_agent() {
+        // codex has fewer modes than claude — cycling past its end must
+        // wrap against *its* list, not claude's.
+        let codex_idx = crate::worktree::AGENTS
+            .iter()
+            .position(|a| *a == "codex")
+            .expect("codex is a known agent");
+        let mut pick = AgentPick {
+            agent_idx: codex_idx,
+            mode_idx: 0,
+        };
+        let len = crate::worktree::CODEX_MODES.len();
+        for i in 1..=len {
+            pick.cycle_mode(1);
+            assert_eq!(pick.mode_idx, i % len);
+        }
+        assert_eq!(pick.mode_idx, 0);
+        pick.cycle_mode(-1);
+        assert_eq!(pick.mode_idx, len - 1);
+        assert_eq!(pick.mode(), crate::worktree::CODEX_MODES[len - 1]);
+    }
+
+    #[test]
+    fn agent_pick_out_of_range_indices_are_inert() {
+        let pick = AgentPick {
+            agent_idx: 99,
+            mode_idx: 99,
+        };
+        assert_eq!(pick.agent(), "");
+        assert_eq!(pick.mode(), "");
+        // The launch path must still produce something runnable.
+        assert_eq!(pick.agent_or_default(), crate::worktree::DEFAULT_AGENT);
+        assert_eq!(
+            pick.mode_or_default(crate::worktree::DEFAULT_AGENT),
+            crate::worktree::DEFAULT_MODE
+        );
+    }
+
     // ─── PopupState::set_*_area ──────────────────────────────────────
 
     #[test]
@@ -523,6 +747,7 @@ mod tests {
         popup.set_notices_area(Some(rect));
         popup.set_spawn_input_area(Some(rect));
         popup.set_remove_confirm_area(Some(rect));
+        popup.set_open_worktree_area(Some(rect));
         match popup {
             PopupState::Repo { area, .. } => assert_eq!(area, Some(rect)),
             _ => panic!("variant must remain Repo"),
@@ -678,8 +903,7 @@ mod tests {
             input,
             target_repo,
             target_repo_root,
-            agent_idx,
-            mode_idx,
+            pick,
             field,
             anchor_y,
             error,
@@ -689,8 +913,7 @@ mod tests {
             assert!(input.is_empty());
             assert_eq!(target_repo, "alpha");
             assert_eq!(target_repo_root, "/tmp/alpha");
-            assert_eq!(*agent_idx, 0);
-            assert_eq!(*mode_idx, 0);
+            assert_eq!(*pick, AgentPick::default());
             assert_eq!(*field, SpawnField::Task);
             assert_eq!(*anchor_y, Some(7));
             assert!(error.is_none());
@@ -758,22 +981,14 @@ mod tests {
         state.open_spawn_input_for_repo("alpha".into(), "/tmp/alpha".into(), None);
         // Switch field to Agent, bump mode_idx artificially, then cycle to
         // verify mode_idx resets to 0 on agent change.
-        if let PopupState::SpawnInput {
-            field, mode_idx, ..
-        } = &mut state.popup
-        {
+        if let PopupState::SpawnInput { field, pick, .. } = &mut state.popup {
             *field = SpawnField::Agent;
-            *mode_idx = 1;
+            pick.mode_idx = 1;
         }
         state.spawn_input_cycle(1);
-        if let PopupState::SpawnInput {
-            agent_idx,
-            mode_idx,
-            ..
-        } = &state.popup
-        {
-            assert_eq!(*agent_idx, 1 % crate::worktree::AGENTS.len());
-            assert_eq!(*mode_idx, 0);
+        if let PopupState::SpawnInput { pick, .. } = &state.popup {
+            assert_eq!(pick.agent_idx, 1 % crate::worktree::AGENTS.len());
+            assert_eq!(pick.mode_idx, 0);
         }
     }
 
@@ -782,14 +997,8 @@ mod tests {
         let mut state = AppState::new("%99".into());
         state.open_spawn_input_for_repo("alpha".into(), "/tmp/alpha".into(), None);
         state.spawn_input_cycle(1);
-        if let PopupState::SpawnInput {
-            agent_idx,
-            mode_idx,
-            ..
-        } = &state.popup
-        {
-            assert_eq!(*agent_idx, 0);
-            assert_eq!(*mode_idx, 0);
+        if let PopupState::SpawnInput { pick, .. } = &state.popup {
+            assert_eq!(*pick, AgentPick::default());
         }
     }
 
@@ -855,6 +1064,47 @@ mod tests {
         state.popup = PopupState::Notices { area: None };
         state.confirm_remove(crate::worktree::RemoveMode::WindowOnly);
         assert!(matches!(state.popup, PopupState::Notices { .. }));
+    }
+
+    #[test]
+    fn remove_confirm_label_names_the_branch_that_gets_deleted() {
+        // The title is what the user reads before pressing `y`, and `y`
+        // runs `git branch -D` on the branch marker. An opened worktree
+        // can live in a directory named nothing like its branch, so the
+        // directory basename would confirm a deletion of the wrong name.
+        let markers = crate::worktree::SpawnMarkers {
+            spawned: true,
+            from_repo: "/repo".into(),
+            worktree_path: "/home/u/wt/hotfix".into(),
+            branch: "feature/JIRA-4821-payment-retry".into(),
+            window_id: "@1".into(),
+            opened: true,
+        };
+        assert_eq!(
+            remove_confirm_label(&markers),
+            "feature/JIRA-4821-payment-retry"
+        );
+    }
+
+    #[test]
+    fn remove_confirm_label_falls_back_to_dir_name_when_detached() {
+        let markers = crate::worktree::SpawnMarkers {
+            spawned: true,
+            from_repo: "/repo".into(),
+            worktree_path: "/repo/.worktrees/spike".into(),
+            branch: String::new(),
+            window_id: "@1".into(),
+            opened: true,
+        };
+        assert_eq!(remove_confirm_label(&markers), "spike");
+    }
+
+    #[test]
+    fn remove_confirm_label_is_empty_when_nothing_identifies_the_target() {
+        assert_eq!(
+            remove_confirm_label(&crate::worktree::SpawnMarkers::default()),
+            ""
+        );
     }
 
     #[test]

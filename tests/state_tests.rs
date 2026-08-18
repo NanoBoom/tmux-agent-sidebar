@@ -872,16 +872,15 @@ fn open_spawn_input_initialises_fields_to_defaults() {
             input,
             target_repo,
             target_repo_root,
-            agent_idx,
-            mode_idx,
+            pick,
             field,
             ..
         } => {
             assert_eq!(input, "");
             assert_eq!(target_repo, "myproj");
             assert_eq!(target_repo_root, "/home/u/myproj");
-            assert_eq!(*agent_idx, 0);
-            assert_eq!(*mode_idx, 0);
+            assert_eq!(pick.agent_idx, 0);
+            assert_eq!(pick.mode_idx, 0);
             assert_eq!(*field, tmux_agent_sidebar::state::SpawnField::Task);
         }
         _ => panic!("expected SpawnInput popup"),
@@ -954,20 +953,16 @@ fn spawn_input_cycle_changes_agent_and_resets_mode() {
     // Cycle agent forward — expect agent_idx to advance.
     state.spawn_input_cycle(1);
     match &state.popup {
-        PopupState::SpawnInput {
-            agent_idx,
-            mode_idx,
-            ..
-        } => {
-            assert_eq!(*agent_idx, 1, "agent should advance");
-            assert_eq!(*mode_idx, 0, "mode should reset when agent changes");
+        PopupState::SpawnInput { pick, .. } => {
+            assert_eq!(pick.agent_idx, 1, "agent should advance");
+            assert_eq!(pick.mode_idx, 0, "mode should reset when agent changes");
         }
         _ => panic!(),
     }
     // Cycle back — wraps to 0.
     state.spawn_input_cycle(-1);
     match &state.popup {
-        PopupState::SpawnInput { agent_idx, .. } => assert_eq!(*agent_idx, 0),
+        PopupState::SpawnInput { pick, .. } => assert_eq!(pick.agent_idx, 0),
         _ => panic!(),
     }
 }
@@ -979,13 +974,9 @@ fn spawn_input_cycle_on_mode_field_increments_mode_only() {
     state.spawn_input_next_field(); // mode
     state.spawn_input_cycle(1);
     match &state.popup {
-        PopupState::SpawnInput {
-            agent_idx,
-            mode_idx,
-            ..
-        } => {
-            assert_eq!(*agent_idx, 0);
-            assert_eq!(*mode_idx, 1);
+        PopupState::SpawnInput { pick, .. } => {
+            assert_eq!(pick.agent_idx, 0);
+            assert_eq!(pick.mode_idx, 1);
         }
         _ => panic!(),
     }
@@ -998,13 +989,9 @@ fn spawn_input_cycle_on_input_field_is_noop() {
     state.spawn_input_cycle(1);
     state.spawn_input_cycle(-1);
     match &state.popup {
-        PopupState::SpawnInput {
-            agent_idx,
-            mode_idx,
-            ..
-        } => {
-            assert_eq!(*agent_idx, 0);
-            assert_eq!(*mode_idx, 0);
+        PopupState::SpawnInput { pick, .. } => {
+            assert_eq!(pick.agent_idx, 0);
+            assert_eq!(pick.mode_idx, 0);
         }
         _ => panic!(),
     }
@@ -1049,14 +1036,10 @@ fn agent_cycle_keeps_mode_in_bounds_for_codex() {
     state.spawn_input_prev_field(); // field = 1
     state.spawn_input_cycle(1); // agent → codex
     match &state.popup {
-        PopupState::SpawnInput {
-            agent_idx,
-            mode_idx,
-            ..
-        } => {
-            assert_eq!(*agent_idx, 1);
+        PopupState::SpawnInput { pick, .. } => {
+            assert_eq!(pick.agent_idx, 1);
             // Mode must have reset to 0 (< codex mode list length).
-            assert!(*mode_idx < worktree::CODEX_MODES.len());
+            assert!(pick.mode_idx < worktree::CODEX_MODES.len());
         }
         _ => panic!(),
     }
@@ -1065,16 +1048,16 @@ fn agent_cycle_keeps_mode_in_bounds_for_codex() {
 #[test]
 fn open_remove_confirm_for_unknown_pane_sets_flash_and_keeps_popup_closed() {
     // Without a real tmux environment `display_message` returns an
-    // empty string, so the "not spawned" branch should fire, set the
-    // flash banner, and leave the popup state untouched.
+    // empty string, so the "not created by sidebar" branch should fire,
+    // set the flash banner, and leave the popup state untouched.
     let mut state = make_state(vec![]);
     assert!(state.flash.is_none());
     state.open_remove_confirm_for_pane("%nonexistent".into());
     assert!(matches!(state.popup, PopupState::None));
     let flash = state.flash.as_ref().expect("flash must be set");
     assert!(
-        flash.0.contains("not spawned"),
-        "flash should mention the unspawned pane: {:?}",
+        flash.0.contains("not created by sidebar"),
+        "flash should mention that the pane is not sidebar-created: {:?}",
         flash.0
     );
 }
@@ -1084,8 +1067,8 @@ fn handle_mouse_click_routes_spawn_remove_targets_to_open_remove_confirm() {
     // Stuff a synthetic × click target into layout.spawn_remove_targets
     // and verify the click handler routes to
     // `open_remove_confirm_for_pane`. Without a tmux env the call
-    // flashes "not spawned", which still proves the routing worked
-    // (otherwise flash would stay None).
+    // flashes "not created by sidebar", which still proves the routing
+    // worked (otherwise flash would stay None).
     use tmux_agent_sidebar::state::SpawnRemoveTarget;
     let mut state = make_state(vec![]);
     state.layout.spawn_remove_targets = vec![SpawnRemoveTarget {
@@ -1095,7 +1078,7 @@ fn handle_mouse_click_routes_spawn_remove_targets_to_open_remove_confirm() {
     state.handle_mouse_click(5, 5);
     let flash = state.flash.as_ref().expect("click should have fired");
     assert!(
-        flash.0.contains("not spawned"),
+        flash.0.contains("not created by sidebar"),
         "click on × target should call open_remove_confirm_for_pane: {:?}",
         flash.0
     );
