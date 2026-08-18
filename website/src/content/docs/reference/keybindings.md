@@ -64,7 +64,8 @@ Opened with `o` on a pane. Lists every existing worktree of that pane's
 repository — the main checkout included — and launches an agent in the
 one you pick. Unlike `n` this creates no git state, but the resulting
 window is closed with `x` just like a spawned one — including the `[y]`
-option, which will delete a worktree and branch you created yourself.
+option, which will delete a worktree and branch you created yourself
+(refused while that worktree has uncommitted changes).
 
 ### Step 1 — pick the worktree
 
@@ -97,3 +98,9 @@ Opened with `x` on a sidebar-created pane (`n` or `o`).
 | `y` / `Enter`   | Close the tmux window, remove the git worktree (`--force`), and delete the branch (`git branch -D`)       |
 | `c`             | Close the tmux window only, keep the worktree and branch on disk                                          |
 | `n` / `Esc`     | Cancel                                                                                                    |
+
+`y` / `Enter` are **refused while the worktree has uncommitted changes**
+— the modal shows `! uncommitted changes`, renders the option as
+`[y] remove — blocked`, and answers `commit or stash first` if you press
+it anyway. `c` keeps working. See
+[Uncommitted changes block `[y]`](/tmux-agent-sidebar/features/worktree/#uncommitted-changes-block-y).

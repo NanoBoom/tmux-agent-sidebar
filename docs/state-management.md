@@ -301,6 +301,9 @@ enum PopupState {
     RemoveConfirm {
         pane_id: String,
         branch: String,
+        /// Worktree has uncommitted work, sampled when the modal opens.
+        /// Greys out `[y]` and makes `confirm_remove` refuse it.
+        dirty: bool,
         error: Option<String>,
         area: Option<Rect>,
     },

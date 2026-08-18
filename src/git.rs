@@ -349,13 +349,36 @@ pub fn worktree_add(repo: &str, worktree_path: &str, branch: &str) -> Result<(),
     run_git_capture(repo, &["worktree", "add", worktree_path, "-b", branch]).map(|_| ())
 }
 
-/// `git worktree remove --force <worktree_path>`. `--force` is used
-/// because the sidebar's remove flow only runs when the user explicitly
-/// picks "close window + remove worktree" — agent sessions routinely
-/// leave untracked state behind and git would otherwise strand the
-/// worktree. Users who want to keep the checkout have `w` (window only).
+/// `git worktree remove --force <worktree_path>`. `--force` covers the
+/// cases plain `remove` refuses for reasons the user cannot act on from
+/// the sidebar (a locked entry, a worktree git considers unclean for
+/// reasons `status --porcelain` does not report). It is *not* what
+/// handles uncommitted work: [`worktree_is_dirty`] gates this call, so
+/// the remove flow never reaches here with work to lose. Users who want
+/// to keep the checkout have `[c]` (window only).
 pub fn worktree_remove(repo: &str, worktree_path: &str) -> Result<(), String> {
     run_git_capture(repo, &["worktree", "remove", "--force", worktree_path]).map(|_| ())
+}
+
+/// `true` when the worktree at `worktree_path` has staged, unstaged or
+/// untracked changes — i.e. `git worktree remove --force` would throw
+/// work away. `--porcelain` already excludes ignored files, so build
+/// artifacts do not count.
+///
+/// A path that is empty or gone reads as clean: the remove flow skips
+/// `git worktree remove` there anyway, and blocking on a directory that
+/// no longer exists would strand the window. Any *other* git failure on
+/// an existing directory reads as **dirty** — an unverifiable worktree
+/// must not be force-removed, and `[c] close window only` is still
+/// available as the escape hatch.
+pub fn worktree_is_dirty(worktree_path: &str) -> bool {
+    if worktree_path.is_empty() || !std::path::Path::new(worktree_path).exists() {
+        return false;
+    }
+    // `run_git_capture` trims, so a clean tree comes back as "".
+    run_git_capture(worktree_path, &["status", "--porcelain"])
+        .map(|out| !out.is_empty())
+        .unwrap_or(true)
 }
 
 /// `git branch -D <branch>`. Used by the spawn rollback path to drop

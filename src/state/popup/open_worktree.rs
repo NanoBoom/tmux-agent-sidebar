@@ -324,8 +324,17 @@ impl AppState {
         // and the renderer derives that row from the *clamped* offset —
         // so the same clamp has to happen here or a click after a resize
         // maps to the wrong worktree.
+        //
+        // `idx < visible` is a separate bound from `< rows.len()`: the
+        // popup *area* includes both border rows while the renderer only
+        // draws `visible` of them, so a click on the bottom border
+        // arrives as `idx == visible` and would otherwise select the
+        // first off-screen row (and scroll the list to reveal it).
         let start = clamp_scroll(*scroll, rows.len(), visible);
-        let Some(target) = idx.checked_add(start).filter(|i| *i < rows.len()) else {
+        let Some(target) = idx
+            .checked_add(start)
+            .filter(|i| idx < visible && *i < rows.len())
+        else {
             return;
         };
         *selected = target;
@@ -358,12 +367,15 @@ impl AppState {
         let repo_root = target_repo_root.clone();
 
         if step == OpenStep::Pick {
-            if let PopupState::OpenWorktree {
-                step, pick, field, ..
-            } = &mut self.popup
-            {
+            if let PopupState::OpenWorktree { step, field, .. } = &mut self.popup {
                 *step = OpenStep::Configure;
-                *pick = super::AgentPick::default();
+                // `pick` is deliberately NOT reset. The whole reason
+                // both steps share one popup variant is that `Esc` must
+                // not throw away work; resetting here made the worktree
+                // list survive the round trip but silently snapped the
+                // user's agent/mode back to the defaults. It starts at
+                // `AgentPick::default()` when the modal opens, which is
+                // the only place a fresh selection is warranted.
                 *field = OpenField::default();
             }
             return;
@@ -859,6 +871,39 @@ mod tests {
     }
 
     #[test]
+    fn stepping_back_and_forward_preserves_the_agent_and_mode_pick() {
+        // Regression: the Pick → Configure transition used to reset
+        // `pick`, so `codex` → Esc → Enter silently snapped back to
+        // `claude`. Both steps share one popup variant precisely so
+        // `Esc` costs the user nothing.
+        let mut state = state_with_picker(vec![row("/a", "main"), row("/b", "agent/x")]);
+        state.confirm_open_worktree(); // Pick → Configure
+        state.open_worktree_cycle(1); // agent: claude → codex
+        state.open_worktree_next_field();
+        state.open_worktree_cycle(1); // mode: first → second
+
+        state.open_worktree_back(); // Configure → Pick
+        state.confirm_open_worktree(); // Pick → Configure again
+
+        match &state.popup {
+            PopupState::OpenWorktree { pick, field, .. } => {
+                assert_eq!(pick.agent(), "codex", "the agent pick must survive Esc");
+                assert_eq!(
+                    pick.mode(),
+                    crate::worktree::CODEX_MODES[1],
+                    "the mode pick must survive Esc"
+                );
+                assert_eq!(
+                    *field,
+                    OpenField::Agent,
+                    "focus still returns to the first field"
+                );
+            }
+            _ => panic!("popup must stay open"),
+        }
+    }
+
+    #[test]
     fn back_from_pick_closes_the_popup() {
         let mut state = state_with_picker(vec![row("/a", "main")]);
         state.open_worktree_back();
@@ -977,6 +1022,37 @@ mod tests {
             state.open_worktree_scroll(),
             0,
             "a window that fits every row must sit at offset 0"
+        );
+    }
+
+    #[test]
+    fn select_row_ignores_a_click_on_the_bottom_border() {
+        // Regression: the popup *area* includes both border rows while
+        // the renderer only draws `visible` of them, so a click on the
+        // bottom border arrives as `idx == visible`. Validating only
+        // `idx + start < rows.len()` accepted it, selecting the first
+        // off-screen row and scrolling the list by one.
+        let rows: Vec<_> = (0..8)
+            .map(|i| row(&format!("/w{i}"), &format!("agent/{i}")))
+            .collect();
+        let mut state = state_with_picker(rows);
+        // 6-row popup → 4 visible rows, so indices 0..=3 are on screen.
+        state
+            .popup
+            .set_open_worktree_area(Some(Rect::new(0, 3, 20, 6)));
+        state.open_worktree_select_row(1);
+        assert_eq!(state.open_worktree_selected(), 1);
+
+        state.open_worktree_select_row(4);
+        assert_eq!(
+            state.open_worktree_selected(),
+            1,
+            "a click on the bottom border must not move the selection"
+        );
+        assert_eq!(
+            state.open_worktree_scroll(),
+            0,
+            "…and must not scroll the list either"
         );
     }
 

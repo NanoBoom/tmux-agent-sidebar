@@ -281,16 +281,22 @@ fn tail_fit(text: &str, max_width: usize) -> String {
 }
 
 pub(super) fn render_remove_confirm_popup(frame: &mut Frame, state: &mut AppState, area: Rect) {
-    let (branch, error) = match &state.popup {
-        PopupState::RemoveConfirm { branch, error, .. } => (branch.clone(), error.clone()),
+    let (branch, dirty, error) = match &state.popup {
+        PopupState::RemoveConfirm {
+            branch,
+            dirty,
+            error,
+            ..
+        } => (branch.clone(), *dirty, error.clone()),
         _ => return,
     };
     let theme = &state.theme;
 
     // Narrow-friendly: put the branch in the title, keep option rows
     // short enough to fit in ~16 columns. Reserve an extra row when
-    // an inline error is present.
-    let popup_height: u16 = if error.is_some() { 7 } else { 6 };
+    // an inline error is present, and another for the uncommitted-work
+    // warning that pushes the options down.
+    let popup_height: u16 = 6 + u16::from(dirty) + u16::from(error.is_some());
     let popup_rect = center_popup(area, area.width.min(28), popup_height);
     state.popup.set_remove_confirm_area(Some(popup_rect));
 
@@ -316,26 +322,51 @@ pub(super) fn render_remove_confirm_popup(frame: &mut Frame, state: &mut AppStat
         }
     };
 
+    // A dirty worktree pushes a warning above the options and renders
+    // `[y]` inactive — the key is refused by `confirm_remove`, and a
+    // destructive row in its usual red would read as available.
+    let opts_y = u16::from(dirty);
+    if dirty {
+        render_row(
+            frame,
+            0,
+            "! uncommitted changes",
+            Style::default().fg(theme.status_waiting),
+        );
+    }
     render_row(
         frame,
-        0,
-        "[y] remove worktree",
-        Style::default().fg(theme.status_error),
+        opts_y,
+        if dirty {
+            "[y] remove — blocked"
+        } else {
+            "[y] remove worktree"
+        },
+        Style::default().fg(if dirty {
+            theme.text_inactive
+        } else {
+            theme.status_error
+        }),
     );
     render_row(
         frame,
-        1,
+        opts_y + 1,
         "[c] close window only",
         Style::default().fg(theme.text_active),
     );
     render_row(
         frame,
-        2,
+        opts_y + 2,
         "[n] cancel",
         Style::default().fg(theme.text_muted),
     );
     if let Some(err) = error {
-        render_row(frame, 4, &err, Style::default().fg(theme.status_error));
+        render_row(
+            frame,
+            opts_y + 4,
+            &err,
+            Style::default().fg(theme.status_error),
+        );
     }
 }
 
