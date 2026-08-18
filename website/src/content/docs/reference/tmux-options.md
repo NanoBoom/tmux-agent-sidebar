@@ -17,6 +17,7 @@ Most options must be set **before** loading the plugin in your `tmux.conf`. Colo
 | `@sidebar_bottom_height`         | `20`    | Bottom panel height in lines (`0` is equivalent to `@sidebar_bottom off`)                |
 | `@sidebar_auto_create`           | `on`    | Auto-create the sidebar on new windows (set `off` to disable)                           |
 | `@sidebar_auto_create_delay`     | `0`     | Seconds to defer auto-create after a window opens, so a declaratively-built window (e.g. tmuxinator's `select-layout`) finishes before the sidebar pane is injected; accepts fractional seconds. `0` keeps the create synchronous |
+| `@sidebar_auto_close`            | `on`    | Close the sidebar once it is the only pane left in its window, instead of leaving it stranded in an empty window (set `off` to disable). The sidebar is kept if closing it would destroy the last window of a session with two or more attached clients, since that would disconnect all of them. Read at config-load time and at sidebar start, so a change needs both a config reload and a sidebar restart |
 | `@sidebar_notifications`         | `on`    | Master switch for desktop notifications                                                 |
 | `@sidebar_notifications_events`  | unset   | Restrict events — see [Notifications](/tmux-agent-sidebar/features/notifications/)       |
 | `@sidebar_pet`                  | `off`   | Show the animated pet in a 5-row band above the bottom panel                           |

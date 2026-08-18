@@ -285,22 +285,10 @@ fn should_kill_window(
         return false;
     }
 
-    let Some(windows) = session_windows else {
-        return false;
-    };
-
-    // Last window in the session: killing it destroys the session and
-    // drops every attached client. One attached client is fine — that
-    // matches normal tmux `exit` behaviour on the last pane. Two or
-    // more means a shared session (e.g. several terminal tabs attached
-    // to `main`) where we cannot tell which clients are "wanted", so
-    // preserve the sidebar instead. A missing `session_attached` errs
-    // on the side of preservation.
-    match windows {
-        0 => false,
-        1 => matches!(session_attached, Some(n) if n <= 1),
-        _ => true,
-    }
+    // Session-level safety (last window / attached clients) is shared
+    // with the sidebar's own self-close path so the two can never
+    // disagree about when tearing down a window is acceptable.
+    tmux::session_safe_to_close(session_windows, session_attached)
 }
 
 pub(crate) fn cmd_auto_close(args: &[String]) -> i32 {

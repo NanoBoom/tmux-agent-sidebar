@@ -10,15 +10,16 @@ use std::time::Duration;
 use crossterm::event::{self};
 use ratatui::{Terminal, backend::CrosstermBackend};
 
-use crate::SPINNER_PULSE;
+use crate::{SPINNER_PULSE, tmux};
 
 mod input;
 mod render;
 mod setup;
 mod workers;
 
-/// Run the TUI event loop. Returns when the loop exits (currently only on
-/// fatal I/O error, since the loop is `loop { ... }`).
+/// Run the TUI event loop. Returns on a fatal I/O error, or `Ok(())` once
+/// the sidebar has been left as the only pane in its window and closed
+/// itself (see `@sidebar_auto_close`).
 ///
 /// `needs_refresh` is the process-wide SIGUSR1 flag owned by `main.rs` — the
 /// signal handler must reference a static visible at signal-handler time,
@@ -86,14 +87,24 @@ pub fn run(
         let sigusr1 = needs_refresh.swap(false, Ordering::Relaxed);
         if sigusr1 || last_refresh.elapsed() >= refresh_interval {
             let previous_focused_pane_id = state.focus_state.focused_pane_id.clone();
-            let is_window_active = state.refresh();
+            let outcome = state.refresh();
+            // The sidebar is now alone in its window. tmux only fires
+            // `pane-exited` when a pane's *process* exits, so every other
+            // way of losing the last neighbour — `kill-pane`, `break-pane`,
+            // `move-pane` — reaches no hook the plugin could bind (tmux has
+            // no `after-break-pane`/`after-move-pane` at all). Noticing it
+            // on our own tick is the only path that covers them.
+            if outcome.self_close {
+                let _ = tmux::run_tmux(&["kill-pane", "-t", &state.tmux_pane]);
+                return Ok(());
+            }
             if state.bottom_panel_visible()
                 && state.focus_state.focused_pane_id != previous_focused_pane_id
             {
                 render::refresh_git_for_focused_pane(&mut state);
             }
             needs_redraw = true;
-            if is_window_active {
+            if outcome.window_active {
                 if window_inactive_count >= 2 {
                     state.global.load_from_tmux();
                     state.rebuild_row_targets();

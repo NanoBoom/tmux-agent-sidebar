@@ -8,6 +8,17 @@ use crate::tmux::{self, PaneStatus, SessionInfo};
 
 use super::AppState;
 
+/// What the main loop needs to know after an [`AppState::refresh`] pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RefreshOutcome {
+    /// The sidebar's window is the active window of its session. Drives
+    /// the "window went inactive" backoff in the event loop.
+    pub window_active: bool,
+    /// The sidebar is now the only pane left in its window and should
+    /// tear itself down. Always `false` when `@sidebar_auto_close` is off.
+    pub self_close: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TaskProgressDecision {
     Clear,
@@ -150,10 +161,16 @@ impl AppState {
     }
 
     /// Fast refresh: tmux state + activity log (called every 1s).
-    /// Returns whether the sidebar's window is the active tmux window.
-    pub fn refresh(&mut self) -> bool {
+    /// Returns the window-active flag plus whether the sidebar has been
+    /// left alone in its window and should close itself.
+    pub fn refresh(&mut self) -> RefreshOutcome {
         self.refresh_now();
-        let (focused, window_active, _, _) = tmux::get_sidebar_pane_info(&self.tmux_pane);
+        let pane_info = tmux::get_sidebar_pane_info(&self.tmux_pane);
+        let focused = pane_info.pane_active;
+        let outcome = RefreshOutcome {
+            window_active: pane_info.window_active,
+            self_close: self.auto_close_enabled && pane_info.should_self_close(),
+        };
         let (mut sessions, mut process_snapshot) = tmux::query_sessions_with_process_snapshot();
         self.sweep_dead_bg_shells_if_due(&mut sessions, &mut process_snapshot);
         if let Some(process_snapshot) = self.refresh_port_data(&sessions, process_snapshot.as_ref())
@@ -171,7 +188,7 @@ impl AppState {
             self.sessions.dirty = false;
         }
         self.refresh_activity_data();
-        window_active
+        outcome
     }
 
     /// Apply the current `session_id → name` map to each pane so the

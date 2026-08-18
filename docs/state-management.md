@@ -97,6 +97,7 @@ Per-pane file-based state:
 | `pet_frame` | Every 200ms (animation) | Animation frame counter |
 | `pet_bob_timer` | Every 200ms (animation) | Idle bob motion timer |
 | `pet_enabled` | Once at startup | Whether the pet is drawn and ticked (from `@sidebar_pet`) |
+| `auto_close_enabled` | Once at startup | Whether the sidebar closes itself when left as the only pane in its window (from `@sidebar_auto_close`) |
 | `spinner_frame` | Every 200ms (animation) | Spinner animation frame counter |
 | `icons` | Once at startup | `StatusIcons` theme (overridable via tmux options) |
 | `tmux_pane` | Once at startup | This sidebar's own tmux pane ID |
@@ -127,6 +128,7 @@ Per-pane file-based state:
 ├─────────────────────────────────────────────────────────────┤
 │  Once at startup                                             │
 │  theme, bottom_panel_height, bottom_panel_enabled,          │
+│  pet_enabled, auto_close_enabled,                           │
 │  notices.claude_plugin_*,                                   │
 │  notices.claude_settings_has_residual_hooks,                │
 │  notices.claude_plugin_notice, notices.missing_hook_groups  │
@@ -168,7 +170,11 @@ TUI main loop (app::run in app.rs; submodules app/{setup,workers,input,render})
     → installed_plugins.json / ~/.claude/settings.json
     → initializes Claude notices state once
                         ↓
-  → refresh() every 1s
+  → refresh() every 1s → RefreshOutcome { window_active, self_close }
+    → get_sidebar_pane_info() (tmux/panes.rs) ← one `display-message` on our own
+                                       pane: focus, geometry, and the window /
+                                       session counts the self-close check needs
+    → self_close ⇒ `kill-pane` on ourselves, main loop returns (see below)
     → query_sessions() (tmux.rs)     ← reads @pane_* via `tmux list-panes -a`
     → group_panes_by_repo() (group.rs)
     → rebuild_row_targets()          ← applies GlobalState filters
@@ -182,6 +188,50 @@ TUI main loop (app::run in app.rs; submodules app/{setup,workers,input,render})
                         ↓
   → ui::draw() renders frame         ← reads all AppState fields
 ```
+
+---
+
+## Sidebar Auto-Close
+
+When the last non-sidebar pane leaves a window, the sidebar must go with it —
+otherwise it lingers alone in an empty window. Gated by `@sidebar_auto_close`
+(default on).
+
+Two mechanisms cooperate, because no single one covers every path:
+
+| Pane leaves via | `pane-exited` | Handled by |
+| --- | --- | --- |
+| shell `exit`, Ctrl-D, process killed | fires | `pane-exited` hook → `auto-close` subcommand → `kill-window` |
+| `kill-pane` (prefix + x) | **does not fire** | sidebar's own refresh tick |
+| `break-pane` | **does not fire** | sidebar's own refresh tick |
+| `move-pane` / `join-pane` out | **does not fire** | sidebar's own refresh tick |
+
+tmux only notifies `pane-exited` from `server_destroy_pane()`, the
+process-exit path — `kill-pane` goes through `server_kill_pane()` and notifies
+nothing. There is no `after-break-pane` or `after-move-pane` hook to bind at
+all (they are not valid hook names), and `window-layout-changed` also fires on
+every drag-resize, so it is unusable as a trigger. Hence the sidebar checks for
+itself.
+
+**Hook path** (`agent-sidebar.conf` → `cli/toggle.rs::cmd_auto_close`) — fast,
+sub-tick, but only reaches the process-exit case.
+
+**Self-close path** (`state/refresh.rs` → `app.rs`) — covers everything.
+`get_sidebar_pane_info()` already runs one `display-message` on the sidebar's
+own pane each second, so `#{window_panes}`, `#{session_windows}` and
+`#{session_attached}` ride along for free. `window_panes == 1` means "nothing
+but us" (the sidebar always counts itself), and no `@pane_role` parsing is
+needed. On a hit the sidebar runs `kill-pane` on itself and `app::run` returns
+`Ok(())`; `kill-pane` rather than a bare process exit so `remain-on-exit on`
+does not leave a dead-pane husk. `after-kill-pane` is wired to the same
+SIGUSR1 wakeup as the focus hooks, so prefix + x is instant rather than up to
+1s late.
+
+Both paths share `tmux::session_safe_to_close()`: tearing down the last window
+of a session destroys the session and drops every attached client, so that is
+only allowed with at most one client attached. Any query returning `None` (pane
+gone, tmux busy) reads as "cannot prove this is safe" and preserves the sidebar
+— a lingering sidebar is always better than a mass-disconnect.
 
 ---
 
