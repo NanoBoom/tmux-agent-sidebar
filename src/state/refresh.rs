@@ -213,10 +213,19 @@ impl AppState {
     /// sidebar can render `/rename`-assigned labels. The map itself is
     /// refreshed off-thread by `session_poll_loop` in `main.rs`; this
     /// function only consumes the cached snapshot.
+    ///
+    /// With `@sidebar_show_session_name` off every label is cleared instead,
+    /// which is what leaves the row titled with the agent label — see
+    /// `ui::panes::row::status`, which falls back to `agent.label()` on an
+    /// empty `session_name`. Clearing explicitly rather than leaning on the
+    /// map being empty keeps the switch honest even if something else ever
+    /// populates it.
     fn refresh_session_names(&mut self) {
+        let show = self.show_session_name;
         for group in &mut self.repo_groups {
             for (pane, _) in &mut group.panes {
-                if let Some(sid) = &pane.session_id
+                if show
+                    && let Some(sid) = &pane.session_id
                     && let Some(name) = self.sessions.names.get(sid)
                 {
                     pane.session_name.clone_from(name);
@@ -1164,6 +1173,7 @@ mod tests {
             pane_with_session("%1", "sess-a"),
             pane_with_session("%2", "sess-b"),
         ]);
+        state.show_session_name = true;
         state.sessions.names.insert("sess-a".into(), "alpha".into());
         state.sessions.names.insert("sess-b".into(), "beta".into());
 
@@ -1178,12 +1188,35 @@ mod tests {
     }
 
     #[test]
+    fn refresh_session_names_clears_labels_when_option_is_off() {
+        // `@sidebar_show_session_name` off (the default): even with a
+        // populated cache, every label is cleared so the row renderer
+        // falls back to the agent label. Guards against the switch being
+        // bypassed if anything ever fills the map while it is off.
+        let mut state = state_with_panes(vec![pane_with_session("%1", "sess-a")]);
+        assert!(
+            !state.show_session_name,
+            "session name labels must be opt-in"
+        );
+        state.repo_groups[0].panes[0].0.session_name = "stale-label".into();
+        state.sessions.names.insert("sess-a".into(), "alpha".into());
+
+        state.refresh_session_names();
+
+        assert!(
+            state.repo_groups[0].panes[0].0.session_name.is_empty(),
+            "labels must stay empty while @sidebar_show_session_name is off"
+        );
+    }
+
+    #[test]
     fn refresh_session_names_clears_stale_label_when_session_id_missing() {
         // Pane already has a label from a previous tick, but its
         // session_id no longer appears in the cached map (e.g. the
         // session JSON file was deleted). The label must be cleared so
         // the UI does not show a name for a session that is gone.
         let mut state = state_with_panes(vec![pane_with_session("%1", "sess-gone")]);
+        state.show_session_name = true;
         state.repo_groups[0].panes[0].0.session_name = "old-label".into();
         // session_names is empty — no entry for sess-gone.
 
@@ -1237,6 +1270,7 @@ mod tests {
         // The function must not preserve a label that no longer ties
         // to a known session.
         let mut state = state_with_panes(vec![test_pane("%1")]);
+        state.show_session_name = true;
         state.repo_groups[0].panes[0].0.session_name = "stray".into();
         state.sessions.names.insert("sess-a".into(), "alpha".into());
 

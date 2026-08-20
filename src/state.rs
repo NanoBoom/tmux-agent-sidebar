@@ -141,6 +141,13 @@ pub struct AppState {
     /// Whether the pet animation is drawn and ticked. Loaded once at startup
     /// from the `@sidebar_pet` tmux option. Defaults to `false`.
     pub pet_enabled: bool,
+    /// Whether a pane row is titled with the agent's own session name instead
+    /// of the agent label. Loaded once at startup from the
+    /// `@sidebar_show_session_name` tmux option. Defaults to `false`, which
+    /// also keeps [`sessions`](Self::sessions) empty: the polling thread and
+    /// the startup scan are both skipped, so nothing reads
+    /// `~/.claude/sessions/` at all.
+    pub show_session_name: bool,
 }
 
 impl AppState {
@@ -189,6 +196,7 @@ impl AppState {
             bottom_panel_enabled: true,
             sessions: SessionNamesState::new(),
             pet_enabled: false,
+            show_session_name: false,
         };
         crate::state::pet::reseed_pet_idle_motion(&mut state);
         state

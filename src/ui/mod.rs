@@ -71,6 +71,14 @@ pub fn pet_enabled_from_tmux() -> bool {
     pet_enabled_from_options(&opts)
 }
 
+/// Read `@sidebar_show_session_name` from tmux global options, defaulting to
+/// `false` (off) — pane rows are titled with the agent label (`Claude`,
+/// `Codex`) rather than the agent's own session name.
+/// Accepts `on`/`off`, `true`/`false`, `1`/`0` (case-insensitive).
+pub fn show_session_name_from_options(opts: &HashMap<String, String>) -> bool {
+    bool_option(opts, tmux::SIDEBAR_SHOW_SESSION_NAME, false)
+}
+
 // ── public entry point ──────────────────────────────────────────────
 
 pub fn draw(frame: &mut Frame, state: &mut AppState) {
@@ -227,6 +235,34 @@ mod tests {
             let opts = opts_with(tmux::SIDEBAR_PET, value);
             assert!(
                 !pet_enabled_from_options(&opts),
+                "expected {value} to disable"
+            );
+        }
+    }
+
+    #[test]
+    fn show_session_name_defaults_off_when_option_missing() {
+        let opts = HashMap::new();
+        assert!(!show_session_name_from_options(&opts));
+    }
+
+    #[test]
+    fn show_session_name_enabled_when_on() {
+        for value in ["on", "ON", "true", "1", "yes"] {
+            let opts = opts_with(tmux::SIDEBAR_SHOW_SESSION_NAME, value);
+            assert!(
+                show_session_name_from_options(&opts),
+                "expected {value} to enable"
+            );
+        }
+    }
+
+    #[test]
+    fn show_session_name_disabled_when_off() {
+        for value in ["off", "false", "0", "no", ""] {
+            let opts = opts_with(tmux::SIDEBAR_SHOW_SESSION_NAME, value);
+            assert!(
+                !show_session_name_from_options(&opts),
                 "expected {value} to disable"
             );
         }
