@@ -22,6 +22,7 @@ pub(super) fn init_state(tmux_pane: String) -> AppState {
     state.bottom_panel_height = ui::bottom_panel_height_from_options(&opts);
     state.bottom_panel_enabled = ui::bottom_enabled_from_options(&opts);
     state.pet_enabled = ui::pet_enabled_from_options(&opts);
+    state.show_session_name = ui::show_session_name_from_options(&opts);
     state.global.load_from_tmux();
     state.refresh();
 
@@ -48,9 +49,13 @@ pub(super) fn init_state(tmux_pane: String) -> AppState {
     state.refresh_notices();
     // Populate session names synchronously before the first draw so
     // `/rename`-assigned labels show up without waiting for the first
-    // background scan tick.
-    state.sessions.names = session::scan_session_names();
-    state.sessions.dirty = true;
+    // background scan tick. Skipped entirely when the labels are off —
+    // an empty map is exactly what `refresh_session_names` wants then,
+    // and it saves a `~/.claude/sessions/` walk on the startup path.
+    if state.show_session_name {
+        state.sessions.names = session::scan_session_names();
+        state.sessions.dirty = true;
+    }
     state.refresh();
 
     state

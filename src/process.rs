@@ -120,15 +120,35 @@ pub(crate) fn command_basename(command: &str) -> &str {
         .unwrap_or(command)
 }
 
+/// Whether `info` looks like a live process for `agent_name`.
+///
+/// Checks `comm`, then argv[0], then any *path-shaped* later argument.
+/// Looking past argv[0] matters for interpreter-launched agents — e.g. an
+/// agent installed as a venv script runs as
+/// `.../venv/bin/python .../some-agent/entrypoint`, where `comm`/argv[0] is
+/// the interpreter and the agent's own name only appears further along.
+///
+/// Later arguments must contain a `/` to be considered. Agent names are bare
+/// words (`claude`, `codex`, `opencode`), so scanning *every* token would
+/// match any descendant that merely mentions one — `git commit -m codex`,
+/// `echo claude` — and report a long-exited agent as still running, which is
+/// precisely what this check exists to detect. Interpreter invocations always
+/// name the script by path, so the restriction costs nothing.
+///
+/// Comparison is exact basename equality, never a substring test: the
+/// directory component `hermes-agent` must not satisfy a match for `hermes`.
 pub(crate) fn process_matches_agent(info: &ProcessInfo, agent_name: &str) -> bool {
     if command_basename(&info.comm) == agent_name {
         return true;
     }
 
-    let Some(command) = info.args.split_whitespace().next() else {
-        return false;
-    };
-    command_basename(command.trim_matches('"')) == agent_name
+    let matches_token = |token: &str| command_basename(token.trim_matches('"')) == agent_name;
+
+    let mut tokens = info.args.split_whitespace();
+    if tokens.next().is_some_and(matches_token) {
+        return true;
+    }
+    tokens.any(|token| token.contains('/') && matches_token(token))
 }
 
 #[cfg(test)]
@@ -193,6 +213,74 @@ mod tests {
                 args: "/usr/local/bin/not-opencode".to_string(),
             },
             "opencode",
+        ));
+    }
+
+    #[test]
+    fn process_matches_agent_finds_interpreter_launched_script() {
+        // Regression: Hermes Agent's installer runs it as a venv script —
+        // `comm`/argv[0] is the interpreter, and the agent's own name only
+        // shows up as a later argument. A first-token-only check (the old
+        // behavior) can never match this, permanently marking a live
+        // Hermes pane as dead.
+        assert!(process_matches_agent(
+            &ProcessInfo {
+                comm: "python".to_string(),
+                args: "/Users/me/.hermes/hermes-agent/venv/bin/python /Users/me/.hermes/hermes-agent/hermes".to_string(),
+            },
+            "hermes",
+        ));
+    }
+
+    #[test]
+    fn process_matches_agent_rejects_agent_name_as_substring_of_later_arg() {
+        // `hermes-agent` (a directory component) must not satisfy a match
+        // for the bare `hermes` agent name — basename equality must stay
+        // exact even when scanning past argv[0].
+        assert!(!process_matches_agent(
+            &ProcessInfo {
+                comm: "python".to_string(),
+                args: "/usr/bin/python /Users/me/.hermes/hermes-agent".to_string(),
+            },
+            "hermes",
+        ));
+    }
+
+    #[test]
+    fn process_matches_agent_rejects_bare_agent_name_as_a_plain_argument() {
+        // The sidebar's agent names are bare words, so a descendant that
+        // merely mentions one must not read as "the agent is still running" —
+        // that would keep a long-exited pane alive in the sidebar forever.
+        // Only path-shaped later arguments count.
+        for args in [
+            "git commit -m codex",
+            "echo claude",
+            "/usr/bin/env printf opencode",
+        ] {
+            let agent = args.rsplit(' ').next().unwrap();
+            assert!(
+                !process_matches_agent(
+                    &ProcessInfo {
+                        comm: "git".to_string(),
+                        args: args.to_string(),
+                    },
+                    agent,
+                ),
+                "{args:?} must not match {agent:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn process_matches_agent_still_matches_bare_argv0() {
+        // argv[0] keeps its unrestricted check: an agent started as plain
+        // `claude --resume` has no `/` anywhere in its args.
+        assert!(process_matches_agent(
+            &ProcessInfo {
+                comm: "node".to_string(),
+                args: "claude --resume".to_string(),
+            },
+            "claude",
         ));
     }
 }

@@ -89,6 +89,13 @@ pub const SIDEBAR_POSITION: &str = "@sidebar_position";
 /// repository, merging panes across tmux sessions) or `session` (one
 /// group per tmux session). See `crate::group::GroupBy`.
 pub const SIDEBAR_GROUP_BY: &str = "@sidebar_group_by";
+/// Whether a pane row is titled with the agent's own session name instead of
+/// the agent label. Off by default: agents name their sessions automatically
+/// (Claude Code writes `<cwd-basename>-<hash>` into
+/// `~/.claude/sessions/*.json`), which mostly restates the repo group header
+/// the row already sits under. Turn it on to surface `/rename`-assigned
+/// labels.
+pub const SIDEBAR_SHOW_SESSION_NAME: &str = "@sidebar_show_session_name";
 pub const SIDEBAR_AUTO_CLOSE: &str = "@sidebar_auto_close";
 pub const SIDEBAR_FILTER: &str = "@sidebar_filter";
 pub const SIDEBAR_CURSOR: &str = "@sidebar_cursor";

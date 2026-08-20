@@ -125,8 +125,7 @@ pub(crate) fn query_sessions_with_process_snapshot() -> (Vec<SessionInfo>, Optio
     };
 
     let process_snapshot = process_snapshot_for_panes(&all_panes_output);
-    let (mut sessions_map, codex_pids) =
-        build_session_hierarchy(&all_panes_output, process_snapshot.as_ref());
+    let (mut sessions_map, codex_pids) = build_session_hierarchy(&all_panes_output);
     if !codex_pids.is_empty()
         && let Some(snapshot) = &process_snapshot
     {
@@ -138,10 +137,7 @@ pub(crate) fn query_sessions_with_process_snapshot() -> (Vec<SessionInfo>, Optio
 /// Parse the raw `tmux list-panes` output into an indexed session→window→pane
 /// hierarchy. Also returns every Codex pane's pid so the caller can resolve
 /// permission modes in a single `ps` pass.
-fn build_session_hierarchy(
-    all_panes_output: &str,
-    process_snapshot: Option<&ProcessSnapshot>,
-) -> (SessionMap, Vec<CodexPidEntry>) {
+fn build_session_hierarchy(all_panes_output: &str) -> (SessionMap, Vec<CodexPidEntry>) {
     let mut sessions_map: SessionMap = indexmap::IndexMap::new();
     let mut codex_pids: Vec<CodexPidEntry> = Vec::new();
     let mut seen_pids: HashSet<u32> = HashSet::new();
@@ -183,7 +179,7 @@ fn build_session_hierarchy(
                 panes: Vec::new(),
             });
 
-        if let Some(pane) = parse_pane_fields_with_processes(pane_fields, process_snapshot) {
+        if let Some(pane) = parse_pane_fields(pane_fields) {
             if pane.agent == AgentType::Codex
                 && let Some(pid) = pane.pane_pid
             {
@@ -242,19 +238,16 @@ fn finalize_sessions(sessions_map: SessionMap) -> Vec<SessionInfo> {
 /// Returns None if the line has too few fields, is a sidebar, or has no agent.
 /// Thin wrapper used by the unit tests, which still construct a raw
 /// `|`-joined fixture line. Production callers go through
-/// `parse_pane_fields_with_processes` directly to avoid re-joining and re-splitting
+/// `parse_pane_fields` directly to avoid re-joining and re-splitting
 /// fields that may themselves contain literal `|` characters (cwd,
 /// prompt, branch) — see `build_session_hierarchy`.
 #[cfg(test)]
 pub(crate) fn parse_pane_line(line: &str) -> Option<PaneInfo> {
     let parts = split_tmux_fields(line, '|');
-    parse_pane_fields_with_processes(&parts, None)
+    parse_pane_fields(&parts)
 }
 
-fn parse_pane_fields_with_processes(
-    parts: &[String],
-    process_snapshot: Option<&ProcessSnapshot>,
-) -> Option<PaneInfo> {
+fn parse_pane_fields(parts: &[String]) -> Option<PaneInfo> {
     if parts.len() < pane_line_field::MIN_FIELDS {
         return None;
     }
@@ -264,30 +257,13 @@ fn parse_pane_fields_with_processes(
     }
 
     let agent = AgentType::from_label(&parts[pane_line_field::AGENT])?;
-    let current_command = parts[pane_line_field::PANE_CURRENT_COMMAND].as_str();
     let pane_pid: Option<u32> = parts[pane_line_field::PANE_PID].parse().ok();
 
-    // Codex / OpenCode panes can leave stale tmux metadata behind after the
-    // agent exits and the pane falls back to the user's shell. Neither
-    // agent exposes a reliable "process exit" hook (Codex has no such
-    // hook, OpenCode runs under Bun where `process.on("exit")` does not
-    // fire our handlers), so the Rust polling side must own teardown:
-    // wipe pane options + activity log the first poll after the agent
-    // is gone. Subsequent polls short-circuit at the `AgentType::from_label`
-    // check above once `@pane_agent` has been cleared. Claude is excluded
-    // because its SessionEnd hook drives cleanup instead.
-    if matches!(agent, AgentType::Codex | AgentType::OpenCode) && is_shell_command(current_command)
-    {
-        let agent_still_alive = pane_pid
-            .and_then(|pid| {
-                process_snapshot.map(|snapshot| snapshot.tree_has_agent(&[pid], &agent))
-            })
-            .unwrap_or(false);
-        if !agent_still_alive {
-            clear_agent_pane_state(&parts[pane_line_field::PANE_ID]);
-            return None;
-        }
-    }
+    // Note: the shell-fallback teardown for Codex / OpenCode panes lives in
+    // `AppState::sweep_exited_agent_panes`, not here. This layer is stateless
+    // and re-runs from scratch every tick, so it has nowhere to keep a miss
+    // counter — and acting on a single racy `ps` snapshot is exactly what
+    // made live panes vanish. See `state::refresh::DEAD_SCAN_THRESHOLD`.
 
     // Prefer @pane_cwd (set by hook from agent's cwd) over pane_current_path
     let pane_cwd = &parts[pane_line_field::PANE_CWD];
@@ -351,14 +327,15 @@ fn parse_pane_fields_with_processes(
 }
 
 /// Wipe all agent-tracked tmux pane options and the activity log file for
-/// `pane_id`. Triggered by `parse_pane_fields` when it detects a Codex or
-/// OpenCode pane that has dropped back to the user's shell, since neither
-/// CLI fires a reliable process-exit hook. Claude panes are never routed
-/// here because Claude has its own SessionEnd hook. The set of keys
-/// mirrors `clear_all_meta` + `clear_run_state` + status/attention clears
-/// in `src/cli/hook/context.rs`; keep them in sync when a new `@pane_*`
-/// key is added.
-fn clear_agent_pane_state(pane_id: &str) {
+/// `pane_id`. Triggered by `AppState::sweep_exited_agent_panes` once a Codex
+/// or OpenCode pane has dropped back to the user's shell for
+/// `DEAD_SCAN_THRESHOLD` consecutive ticks, since neither CLI fires a
+/// reliable process-exit hook. Claude panes are never routed here because
+/// Claude has its own SessionEnd hook. The set of keys mirrors
+/// `clear_all_meta` + `clear_run_state` + status/attention clears in
+/// `src/cli/hook/context.rs`; keep them in sync when a new `@pane_*` key is
+/// added.
+pub(crate) fn clear_agent_pane_state(pane_id: &str) {
     const KEYS: &[&str] = &[
         PANE_AGENT,
         PANE_PROMPT,
@@ -384,7 +361,10 @@ fn clear_agent_pane_state(pane_id: &str) {
     let _ = std::fs::remove_file(log_path);
 }
 
-fn is_shell_command(command: &str) -> bool {
+/// Whether tmux's `pane_current_command` names an interactive shell — i.e.
+/// the pane has dropped back to the user's prompt rather than running an
+/// agent in the foreground.
+pub(crate) fn is_shell_command(command: &str) -> bool {
     const SHELL_COMMANDS: &[&str] = &[
         "ash",
         "bash",
@@ -796,14 +776,6 @@ mod tests {
         ]
     }
 
-    fn process_snapshot(ps_out: &str) -> ProcessSnapshot {
-        ProcessSnapshot::from_ps_output(ps_out)
-    }
-
-    fn field_strings(fields: &[&str]) -> Vec<String> {
-        fields.iter().map(|field| (*field).to_string()).collect()
-    }
-
     #[test]
     fn parse_pane_line_full_fields() {
         let line = make_pane_line(&full_fields());
@@ -953,27 +925,22 @@ mod tests {
     }
 
     #[test]
-    fn parse_pane_line_rejects_stale_codex_shell_pane() {
-        let mut fields = full_fields();
-        fields[3] = "codex";
-        fields[6] = "zsh";
-        let line = make_pane_line(&fields);
-        assert!(
-            parse_pane_line(&line).is_none(),
-            "codex metadata on a shell pane should be treated as stale"
-        );
-    }
-
-    #[test]
-    fn parse_pane_line_rejects_stale_codex_shell_pane_with_path_and_args() {
-        let mut fields = full_fields();
-        fields[3] = "codex";
-        fields[6] = "/usr/local/bin/PwSh -l";
-        let line = make_pane_line(&fields);
-        assert!(
-            parse_pane_line(&line).is_none(),
-            "shell detection should handle paths, args, and case differences"
-        );
+    fn is_shell_command_handles_paths_args_and_case() {
+        // `pane_current_command` is not always a bare name — it can carry a
+        // full path, trailing args, or unexpected case. Getting this wrong
+        // decides whether `sweep_exited_agent_panes` even looks at a pane.
+        for command in ["zsh", "/usr/local/bin/PwSh -l", "/bin/BASH", "fish -c foo"] {
+            assert!(
+                is_shell_command(command),
+                "{command:?} should read as shell"
+            );
+        }
+        for command in ["codex", "/opt/homebrew/bin/claude --resume", "node"] {
+            assert!(
+                !is_shell_command(command),
+                "{command:?} should not read as shell"
+            );
+        }
     }
 
     #[test]
@@ -1002,121 +969,18 @@ mod tests {
         );
     }
 
-    #[test]
-    fn parse_pane_fields_keeps_opencode_shell_pane_when_process_is_alive() {
+    /// Shell-fallback teardown for Codex / OpenCode is owned by
+    /// `AppState::sweep_exited_agent_panes`, which debounces it over
+    /// `DEAD_SCAN_THRESHOLD` ticks. This layer must therefore hand the pane
+    /// through untouched — it has no miss counter, so clearing here meant one
+    /// racy `ps` sample could wipe a live agent. `state::refresh` carries the
+    /// tests for the actual teardown.
+    fn assert_shell_fallback_pane_is_left_to_the_state_layer(agent: &str, shell: &str, pane: &str) {
         let _guard = test_mock::install();
-        let pane = "%OPENCODE_LIVE";
-        test_mock::set(pane, PANE_AGENT, "opencode");
-        test_mock::set(pane, PANE_PROMPT, "keep me");
-
-        let mut fields = full_fields();
-        fields[pane_line_field::PANE_ID] = pane;
-        fields[pane_line_field::AGENT] = "opencode";
-        fields[pane_line_field::PANE_CURRENT_COMMAND] = "fish";
-        fields[pane_line_field::PANE_PID] = "100";
-        let fields = field_strings(&fields);
-        let snapshot = process_snapshot("100 1 fish fish -c opencode\n101 100 opencode opencode\n");
-
-        let pane_info = parse_pane_fields_with_processes(&fields, Some(&snapshot))
-            .expect("live OpenCode child process should keep pane visible");
-
-        assert_eq!(pane_info.agent, AgentType::OpenCode);
-        assert!(test_mock::contains(pane, PANE_AGENT));
-        assert_eq!(
-            test_mock::get(pane, PANE_PROMPT).as_deref(),
-            Some("keep me"),
-            "live OpenCode panes must not be swept just because tmux reports a shell"
-        );
-    }
-
-    #[test]
-    fn parse_pane_fields_keeps_codex_shell_pane_when_process_is_alive() {
-        let _guard = test_mock::install();
-        let pane = "%CODEX_LIVE";
-        test_mock::set(pane, PANE_AGENT, "codex");
-        test_mock::set(pane, PANE_PROMPT, "keep me");
-
-        let mut fields = full_fields();
-        fields[pane_line_field::PANE_ID] = pane;
-        fields[pane_line_field::AGENT] = "codex";
-        fields[pane_line_field::PANE_CURRENT_COMMAND] = "zsh";
-        fields[pane_line_field::PANE_PID] = "200";
-        let fields = field_strings(&fields);
-        let snapshot = process_snapshot(
-            "200 1 zsh zsh -c codex\n201 200 codex /opt/homebrew/bin/codex --full-auto\n",
-        );
-
-        let pane_info = parse_pane_fields_with_processes(&fields, Some(&snapshot))
-            .expect("live Codex child process should keep pane visible");
-
-        assert_eq!(pane_info.agent, AgentType::Codex);
-        assert!(test_mock::contains(pane, PANE_AGENT));
-        assert_eq!(
-            test_mock::get(pane, PANE_PROMPT).as_deref(),
-            Some("keep me"),
-            "live Codex panes must not be swept just because tmux reports a shell"
-        );
-    }
-
-    #[test]
-    fn parse_pane_line_wipes_stale_state_for_codex_shell_pane() {
-        // Codex shares the same shell-fallback sweep path as OpenCode —
-        // neither fires a reliable process-exit hook, so the Rust poller
-        // must clear @pane_* keys and the activity log when the pane
-        // reverts to a shell. Mirrors the OpenCode regression test below.
-        let _guard = test_mock::install();
-        let pane = "%CODEX_STALE";
-        test_mock::set(pane, PANE_AGENT, "codex");
-        test_mock::set(pane, PANE_PROMPT, "previous codex prompt");
-        test_mock::set(pane, PANE_PROMPT_SOURCE, "user");
-        test_mock::set(pane, PANE_STATUS, "waiting");
-        test_mock::set(pane, PANE_STARTED_AT, "1700000000");
-        test_mock::set(pane, PANE_CWD, "/repo/codex");
-        test_mock::set(pane, PANE_WAIT_REASON, "permission");
-        let log = crate::activity::log_file_path(pane);
-        let _ = std::fs::create_dir_all(log.parent().unwrap());
-        std::fs::write(&log, "1234|Bash|pytest\n").unwrap();
-
-        let mut fields = full_fields();
-        fields[pane_line_field::PANE_ID] = pane;
-        fields[pane_line_field::AGENT] = "codex";
-        fields[pane_line_field::PANE_CURRENT_COMMAND] = "zsh";
-        let line = make_pane_line(&fields);
-
-        assert!(parse_pane_line(&line).is_none());
-        for key in &[
-            PANE_AGENT,
-            PANE_PROMPT,
-            PANE_PROMPT_SOURCE,
-            PANE_STATUS,
-            PANE_STARTED_AT,
-            PANE_CWD,
-            PANE_WAIT_REASON,
-        ] {
-            assert!(
-                !test_mock::contains(pane, key),
-                "{key} must be cleared when a codex pane falls back to shell"
-            );
-        }
-        assert!(
-            !log.exists(),
-            "codex activity log must be removed once the agent process is gone"
-        );
-    }
-
-    #[test]
-    fn parse_pane_line_wipes_stale_state_for_opencode_shell_pane() {
-        // When an OpenCode pane falls back to the user's shell, the Rust
-        // polling side owns teardown because OpenCode has no reliable
-        // process-exit hook. The detector must unset every @pane_* key it
-        // seeded and remove the activity log so the next launch starts
-        // from a clean slate without flashing stale prompt/status.
-        let _guard = test_mock::install();
-        let pane = "%OPENCODE_STALE";
-        test_mock::set(pane, PANE_AGENT, "opencode");
+        test_mock::set(pane, PANE_AGENT, agent);
         test_mock::set(pane, PANE_PROMPT, "previous run");
         test_mock::set(pane, PANE_PROMPT_SOURCE, "user");
-        test_mock::set(pane, PANE_STATUS, "running");
+        test_mock::set(pane, PANE_STATUS, "waiting");
         test_mock::set(pane, PANE_STARTED_AT, "1700000000");
         test_mock::set(pane, PANE_CWD, "/repo");
         test_mock::set(pane, PANE_SESSION_ID, "ses-1");
@@ -1126,11 +990,14 @@ mod tests {
 
         let mut fields = full_fields();
         fields[pane_line_field::PANE_ID] = pane;
-        fields[pane_line_field::AGENT] = "opencode";
-        fields[pane_line_field::PANE_CURRENT_COMMAND] = "fish";
+        fields[pane_line_field::AGENT] = agent;
+        fields[pane_line_field::PANE_CURRENT_COMMAND] = shell;
         let line = make_pane_line(&fields);
 
-        assert!(parse_pane_line(&line).is_none());
+        let parsed = parse_pane_line(&line)
+            .expect("query layer must not drop a shell-fallback pane on its own");
+        assert_eq!(parsed.agent, AgentType::from_label(agent).unwrap());
+
         for key in &[
             PANE_AGENT,
             PANE_PROMPT,
@@ -1141,13 +1008,28 @@ mod tests {
             PANE_SESSION_ID,
         ] {
             assert!(
-                !test_mock::contains(pane, key),
-                "{key} must be cleared after shell fallback sweep"
+                test_mock::contains(pane, key),
+                "{key} must survive — teardown is debounced in the state layer"
             );
         }
         assert!(
-            !log.exists(),
-            "activity log must be removed when the agent process is gone"
+            log.exists(),
+            "activity log must survive — teardown is debounced in the state layer"
+        );
+        let _ = std::fs::remove_file(&log);
+    }
+
+    #[test]
+    fn parse_pane_line_keeps_codex_shell_pane_for_the_state_layer() {
+        assert_shell_fallback_pane_is_left_to_the_state_layer("codex", "zsh", "%CODEX_STALE");
+    }
+
+    #[test]
+    fn parse_pane_line_keeps_opencode_shell_pane_for_the_state_layer() {
+        assert_shell_fallback_pane_is_left_to_the_state_layer(
+            "opencode",
+            "fish",
+            "%OPENCODE_STALE",
         );
     }
 
@@ -1275,7 +1157,7 @@ mod tests {
         let line_d = make_full_pane_line("grouped", 0);
 
         let input = format!("{line_a}\n{line_b}\n{line_c}\n{line_d}");
-        let (sessions_map, _) = build_session_hierarchy(&input, None);
+        let (sessions_map, _) = build_session_hierarchy(&input);
         let sessions = finalize_sessions(sessions_map);
 
         // Should produce two sessions: "primary" and "grouped"

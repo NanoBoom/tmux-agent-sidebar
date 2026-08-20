@@ -31,9 +31,14 @@ pub(super) fn spawn(state: &AppState) -> Workers {
     std::thread::spawn(move || {
         git_poll_loop(&tmux_pane_clone, &git_tx, &git_tab_flag);
     });
-    std::thread::spawn(move || {
-        session_poll_loop(&session_tx);
-    });
+    // The session-name map only ever feeds pane row titles, so polling it
+    // is pure waste while `@sidebar_show_session_name` is off. The receiver
+    // stays wired up either way — the main loop just never gets a message.
+    if state.show_session_name {
+        std::thread::spawn(move || {
+            session_poll_loop(&session_tx);
+        });
+    }
     std::thread::spawn(move || {
         if let Some(notice) = version::fetch_update_notice() {
             let _ = version_tx.send(notice);

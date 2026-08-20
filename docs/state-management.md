@@ -61,6 +61,7 @@ pane disappears (`prune_pane_states_to_current_panes`).
 | `pane_states.map[...].inactive_since` | On status change | Debounce timestamp (3s grace before hiding tasks) |
 | `pane_states.map[...].tab_pref` | On user tab switch | Remembered bottom tab choice per pane (cleared on relaunch) |
 | `pane_states.map[...].task_progress_log_mtime` | Every 1s (refresh cycle) | mtime of the task-progress log last parsed; skips re-parsing when unchanged |
+| `pane_states.map[...].dead_scan_misses` | Every 1s and every 10s | Consecutive liveness misses for the pane. Shared by both detectors — `sweep_exited_agent_panes` (every tick, Codex/OpenCode panes that fell back to a shell) and `refresh_port_data` (every 10s, all agent panes). At `DEAD_SCAN_THRESHOLD` (2) the pane's `@pane_*` metadata and activity log are wiped and it leaves the list; any sample that finds the agent resets it to 0. A pane a detector cannot judge is left untouched, so the two never eat each other's progress. Debouncing matters because a single racy `ps` sample would otherwise make a live agent's pane vanish |
 
 Per-pane file-based state:
 
@@ -102,8 +103,9 @@ Per-pane file-based state:
 | `tmux_pane` | Once at startup | This sidebar's own tmux pane ID |
 | `pane_states.seen` | Every 1s | Set of pane IDs that have been seen as agents (bundled with `pane_states.map` under the `PaneRuntimeMap` wrapper) |
 | `version_notice` | Once at startup (bg fetch) | GitHub release update notice, `None` when up-to-date |
-| `sessions.names` | Every 10s (background thread) | `session_id → session name` map; scanned by `session_poll_loop` in `app/workers.rs` so the TUI thread never blocks on filesystem I/O |
-| `sessions.dirty` | On session map refresh / application tick | Marks the session map as changed so the per-pane session label walk only runs when needed |
+| `sessions.names` | Every 10s (background thread) | `session_id → session name` map; scanned by `session_poll_loop` in `app/workers.rs` so the TUI thread never blocks on filesystem I/O. Stays empty while `show_session_name` is off — neither the thread nor the startup scan runs |
+| `show_session_name` | Once at startup | Whether pane rows are titled with the agent's session name instead of the agent label (from `@sidebar_show_session_name`, default `false`) |
+| `sessions.dirty` | On session map refresh / application tick | Marks the session map as changed so the per-pane session label walk only runs when needed. Bypassed while `show_session_name` is on: `apply_session_snapshot` rebuilds each `PaneInfo` with an empty `session_name` every tick, so a dirty-gated walk would leave the row title flipping between the session name and the agent label once per poll |
 
 ---
 
@@ -117,17 +119,19 @@ Per-pane file-based state:
 │  Every 1s (refresh cycle)                                   │
 │  repo_groups, focus_state.focused_pane_id,                  │
 │  layout.pane_row_targets, activity.entries,                 │
-│  pane_states.map[..].task_progress                          │
+│  pane_states.map[..].task_progress,                         │
+│  Codex/OpenCode shell-fallback liveness (debounced)         │
 ├─────────────────────────────────────────────────────────────┤
 │  Every 10s (port scan, background)                          │
 │  pane_states.map[..].ports, agent liveness cleanup          │
+│  (debounced — see pane_states.map[..].dead_scan_misses)     │
 ├─────────────────────────────────────────────────────────────┤
-│  Every 10s (session_names background thread)                │
+│  Every 10s (session_names background thread, opt-in)        │
 │  sessions.names map populated by session_poll_loop          │
 ├─────────────────────────────────────────────────────────────┤
 │  Once at startup                                             │
 │  theme, bottom_panel_height, bottom_panel_enabled,          │
-│  pet_enabled,                                               │
+│  pet_enabled, show_session_name,                            │
 │  notices.claude_plugin_*,                                   │
 │  notices.claude_settings_has_residual_hooks,                │
 │  notices.claude_plugin_notice, notices.missing_hook_groups  │

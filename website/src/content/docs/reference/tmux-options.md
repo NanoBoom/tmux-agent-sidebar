@@ -22,6 +22,7 @@ Most options must be set **before** loading the plugin in your `tmux.conf`. Colo
 | `@sidebar_notifications_events`  | unset   | Restrict events — see [Notifications](/tmux-agent-sidebar/features/notifications/)       |
 | `@sidebar_pet`                  | `off`   | Show the animated pet in a 5-row band above the bottom panel                           |
 | `@sidebar_group_by`             | `repo`  | How panes are grouped: `repo` (one group per repository, merging panes across sessions) or `session` (one group per tmux session). Case-insensitive; any other value falls back to `repo` |
+| `@sidebar_show_session_name`    | `off`   | Title each pane row with the agent's own session name instead of the agent label (`Claude`, `Codex`). Off by default because agents name sessions automatically — Claude Code writes `<cwd-basename>-<hash>` into `~/.claude/sessions/*.json`, which mostly restates the repo group header the row already sits under. Turn it on to surface `/rename`-assigned labels. While off, nothing reads `~/.claude/sessions/` at all: both the startup scan and the 10-second polling thread are skipped |
 
 ## Worktree spawn defaults
 
