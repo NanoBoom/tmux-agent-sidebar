@@ -70,6 +70,32 @@ pub fn new_window(session: &str, cwd: &str, name: &str) -> Result<(String, Strin
     Ok((pane, window))
 }
 
+/// Split `target_pane` vertically down the middle, placing the NEW pane
+/// to the right of it, with `cwd` as its working directory. Returns the
+/// new pane id.
+///
+/// The worktree flow uses this to put the editor on the left (the pane
+/// `new-window` already created) and the agent on the right. Errors are
+/// surfaced rather than swallowed so a failed split rolls the whole
+/// spawn back instead of leaving a half-populated window.
+pub fn split_window_right(target_pane: &str, cwd: &str) -> Result<String, String> {
+    let pane = run_tmux_capture(&[
+        "split-window",
+        "-h",
+        "-t",
+        target_pane,
+        "-c",
+        cwd,
+        "-P",
+        "-F",
+        "#{pane_id}",
+    ])?;
+    if pane.is_empty() {
+        return Err("split-window returned no pane id".into());
+    }
+    Ok(pane)
+}
+
 /// Set a user option at window scope. Needed so markers survive through
 /// split panes that inherit from the window. Returns an error so the
 /// spawn flow can roll back when a marker the remove path relies on

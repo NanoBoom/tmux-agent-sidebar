@@ -22,10 +22,18 @@ pub(crate) trait SpawnEnv {
     /// spawn (`is_free=true`, picks a fresh slug) and remove
     /// (`exists=true`, runs the cleanup).
     fn worktree_path_exists(&self, path: &str) -> bool;
+    /// Whether the worktree holds uncommitted work. The remove flow
+    /// refuses to `git worktree remove --force` a dirty worktree, so
+    /// this is the last line of defence behind the modal's own check.
+    fn worktree_is_dirty(&self, path: &str) -> bool;
     fn worktree_add(&self, repo: &str, worktree_path: &str, branch: &str) -> Result<(), String>;
     fn worktree_remove(&self, repo: &str, worktree_path: &str) -> Result<(), String>;
     fn branch_delete(&self, repo: &str, branch: &str) -> Result<(), String>;
     fn new_window(&self, session: &str, cwd: &str, name: &str) -> Result<(String, String), String>;
+    /// Split `target_pane` so the new pane sits to its right, rooted at
+    /// `cwd`. Returns the new pane id. Only used when an editor is
+    /// configured — see [`super::flow`]'s launch step.
+    fn split_window_right(&self, target_pane: &str, cwd: &str) -> Result<String, String>;
     fn kill_window(&self, window_id: &str) -> Result<(), String>;
     fn set_window_option(&self, window: &str, key: &str, value: &str) -> Result<(), String>;
     fn send_command(&self, target: &str, command: &str) -> Result<(), String>;
@@ -57,6 +65,9 @@ impl SpawnEnv for RealEnv {
     fn worktree_path_exists(&self, path: &str) -> bool {
         !path.is_empty() && Path::new(path).exists()
     }
+    fn worktree_is_dirty(&self, path: &str) -> bool {
+        git::worktree_is_dirty(path)
+    }
     fn worktree_add(&self, repo: &str, path: &str, branch: &str) -> Result<(), String> {
         git::worktree_add(repo, path, branch)
     }
@@ -68,6 +79,9 @@ impl SpawnEnv for RealEnv {
     }
     fn new_window(&self, session: &str, cwd: &str, name: &str) -> Result<(String, String), String> {
         tmux::new_window(session, cwd, name)
+    }
+    fn split_window_right(&self, target_pane: &str, cwd: &str) -> Result<String, String> {
+        tmux::split_window_right(target_pane, cwd)
     }
     fn kill_window(&self, window_id: &str) -> Result<(), String> {
         tmux::kill_window(window_id)

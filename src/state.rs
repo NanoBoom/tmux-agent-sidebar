@@ -11,7 +11,7 @@ mod layout;
 mod notices;
 mod pane_runtime;
 mod pet;
-mod popup;
+pub(crate) mod popup;
 mod refresh;
 mod scroll;
 mod session;
@@ -26,7 +26,7 @@ pub use layout::{FrameLayout, HyperlinkOverlay, RepoSpawnTarget, RowTarget, Spaw
 pub(crate) use notices::debug_forced_display;
 pub use notices::{ClaudePluginNotice, NoticesCopyTarget, NoticesMissingHookGroup, NoticesState};
 pub use pane_runtime::{PaneRuntimeMap, PaneRuntimeState};
-pub use popup::{PopupState, SpawnField};
+pub use popup::{AgentPick, OpenField, OpenStep, OpenWorktreeRow, PopupState, SpawnField};
 pub use refresh::RefreshOutcome;
 #[cfg(test)]
 pub(crate) use refresh::{TaskProgressDecision, classify_task_progress};
@@ -1368,6 +1368,71 @@ mod tests {
 
         assert!(!state.is_repo_popup_open());
         assert_eq!(state.global.repo_filter, RepoFilter::All);
+    }
+
+    // ─── Open worktree popup click routing ───────────────────────────
+
+    fn state_with_open_worktree_popup(area: ratatui::layout::Rect) -> AppState {
+        let mut state = AppState::new("%99".into());
+        state.layout.pane_row_targets = vec![RowTarget {
+            pane_id: "%1".into(),
+        }];
+        state.layout.line_to_row = vec![None, Some(0)];
+        state.popup = PopupState::OpenWorktree {
+            target_repo_root: "/repo".into(),
+            rows: vec![
+                OpenWorktreeRow {
+                    path: "/repo".into(),
+                    branch: "main".into(),
+                    label: "main".into(),
+                    in_use: false,
+                },
+                OpenWorktreeRow {
+                    path: "/repo/.wt/a".into(),
+                    branch: "agent/a".into(),
+                    label: "agent/a".into(),
+                    in_use: false,
+                },
+            ],
+            selected: 0,
+            scroll: 0,
+            step: OpenStep::Pick,
+            editor: String::new(),
+            pick: AgentPick::default(),
+            field: OpenField::default(),
+            anchor_y: None,
+            error: None,
+            area: Some(area),
+        };
+        state
+    }
+
+    #[test]
+    fn mouse_click_inside_open_worktree_popup_selects_row() {
+        let mut state = state_with_open_worktree_popup(ratatui::layout::Rect::new(0, 3, 20, 4));
+        // area.y + 2 = the second list row.
+        state.handle_mouse_click(5, 4);
+        assert!(state.is_open_worktree_open());
+        assert_eq!(state.open_worktree_selected(), 1);
+    }
+
+    #[test]
+    fn mouse_click_on_open_worktree_title_row_does_not_select() {
+        let mut state = state_with_open_worktree_popup(ratatui::layout::Rect::new(0, 3, 20, 4));
+        state.handle_mouse_click(3, 4); // the top border / title row
+        assert!(state.is_open_worktree_open());
+        assert_eq!(state.open_worktree_selected(), 0);
+    }
+
+    #[test]
+    fn mouse_click_outside_open_worktree_popup_closes_without_activating_a_pane() {
+        // Without the popup guard the click would fall through to the
+        // pane rows and activate whatever sits behind the modal.
+        let mut state = state_with_open_worktree_popup(ratatui::layout::Rect::new(0, 6, 20, 4));
+        state.global.selected_pane_row = 0;
+        state.handle_mouse_click(3, 4);
+        assert!(!state.is_open_worktree_open());
+        assert_eq!(state.global.selected_pane_row, 0);
     }
 
     #[test]

@@ -4,7 +4,9 @@ mod test_helpers;
 use test_helpers::*;
 use tmux_agent_sidebar::activity::{ActivityEntry, TaskProgress, TaskStatus};
 use tmux_agent_sidebar::group::{PaneGitInfo, RepoGroup};
-use tmux_agent_sidebar::state::{Focus, PopupState, RepoFilter, StatusFilter};
+use tmux_agent_sidebar::state::{
+    AgentPick, Focus, OpenField, OpenStep, OpenWorktreeRow, PopupState, RepoFilter, StatusFilter,
+};
 use tmux_agent_sidebar::tmux::{
     AgentType, PaneInfo, PaneStatus, PermissionMode, SessionInfo, WindowInfo, WorktreeMetadata,
 };
@@ -1845,13 +1847,14 @@ fn snapshot_spawn_modal_default_state() {
     let pane = make_pane(AgentType::Claude, PaneStatus::Idle);
     let mut state = make_state_for_popup_tests(vec![repo_group_with_root("proj", vec![pane])]);
     state.open_spawn_input_for_repo("proj".into(), "/home/u/proj".into(), None);
-    let output = render_to_string(&mut state, 34, 18);
-    insta::assert_snapshot!(output, @r"
+    let output = render_to_string(&mut state, 34, 22);
+    insta::assert_snapshot!(output, @"
      ≡1  ●0  ◎0  ◐0  ○1  ✕0
     ⓘ╭ Spawn worktree ──────────────╮▾
     p│                              │+
     ┃│ NAME                         │
     ┃│ █                            │
+     │ EDITOR                       │
      │ AGENT                        │
      │ claude                       │
      │ MODE                         │
@@ -1871,16 +1874,18 @@ fn snapshot_spawn_modal_anchors_directly_below_repo_header() {
     // drive the same code path the keyboard `n` handler takes — it
     // must resolve the anchor from the rendered `+` target so the
     // popup opens right below the repo header row (row 2).
-    let _ = render_to_string(&mut state, 34, 18);
+    let _ = render_to_string(&mut state, 34, 22);
     state.global.selected_pane_row = 0;
     state.open_spawn_input_from_selection();
-    let output = render_to_string(&mut state, 34, 18);
-    insta::assert_snapshot!(output, @r"
+    let output = render_to_string(&mut state, 34, 22);
+    insta::assert_snapshot!(output, @"
      ≡1  ●0  ◎0  ◐0  ○1  ✕0
     ⓘ                              — ▾
-    ╭ Spawn worktree ──────────────╮ +
+    proj                             +
+    ╭ Spawn worktree ──────────────╮
     │ NAME                         │
     │ █                            │
+    │ EDITOR                       │
     │ AGENT                        │
     │ claude                       │
     │ MODE                         │
@@ -1900,21 +1905,87 @@ fn snapshot_spawn_modal_advance_fields_cycles_agent_and_mode() {
     for c in "add login".chars() {
         state.spawn_input_push_char(c);
     }
-    state.spawn_input_next_field();
+    state.spawn_input_next_field(); // NAME → EDITOR
+    for c in "nvim".chars() {
+        state.spawn_input_push_char(c);
+    }
+    state.spawn_input_next_field(); // EDITOR → AGENT
     state.spawn_input_cycle(1); // claude → codex
     state.spawn_input_next_field();
     state.spawn_input_cycle(2); // default → bypassPermissions
-    let output = render_to_string(&mut state, 34, 18);
-    insta::assert_snapshot!(output, @r"
+    let output = render_to_string(&mut state, 34, 22);
+    insta::assert_snapshot!(output, @"
      ≡1  ●0  ◎0  ◐0  ○1  ✕0
     ⓘ╭ Spawn worktree ──────────────╮▾
     p│                              │+
     ┃│ NAME                         │
     ┃│ add login                    │
+     │ EDITOR                       │
+     │ nvim                         │
      │ AGENT                        │
      │ codex                        │
      │ MODE                         │
      │ bypassPermissions            │
+     ╰──────────────────────────────╯
+    ╭ Activity │ Git ────────────────╮
+    │         No activity yet        │
+    ╰────────────────────────────────╯
+    ");
+}
+
+#[test]
+fn snapshot_spawn_modal_editor_field_focused_shows_cursor() {
+    // The EDITOR row sits directly above AGENT and behaves like NAME:
+    // free text with a block cursor while focused.
+    let pane = make_pane(AgentType::Claude, PaneStatus::Idle);
+    let mut state = make_state_for_popup_tests(vec![repo_group_with_root("proj", vec![pane])]);
+    state.open_spawn_input_for_repo("proj".into(), "/home/u/proj".into(), None);
+    state.spawn_input_next_field(); // NAME → EDITOR
+    for c in "nvim".chars() {
+        state.spawn_input_push_char(c);
+    }
+    let output = render_to_string(&mut state, 34, 22);
+    insta::assert_snapshot!(output, @"
+     ≡1  ●0  ◎0  ◐0  ○1  ✕0
+    ⓘ╭ Spawn worktree ──────────────╮▾
+    p│                              │+
+    ┃│ NAME                         │
+    ┃│                              │
+     │ EDITOR                       │
+     │ nvim█                        │
+     │ AGENT                        │
+     │ claude                       │
+     │ MODE                         │
+     │ default                      │
+     ╰──────────────────────────────╯
+    ╭ Activity │ Git ────────────────╮
+    │         No activity yet        │
+    ╰────────────────────────────────╯
+    ");
+}
+
+#[test]
+fn snapshot_spawn_modal_tail_fits_long_editor_command() {
+    let pane = make_pane(AgentType::Claude, PaneStatus::Idle);
+    let mut state = make_state_for_popup_tests(vec![repo_group_with_root("proj", vec![pane])]);
+    state.open_spawn_input_for_repo("proj".into(), "/home/u/proj".into(), None);
+    state.spawn_input_next_field(); // NAME → EDITOR
+    for c in "nvim -c 'set number' -c 'NvimTreeOpen' .".chars() {
+        state.spawn_input_push_char(c);
+    }
+    let output = render_to_string(&mut state, 34, 22);
+    insta::assert_snapshot!(output, @"
+     ≡1  ●0  ◎0  ◐0  ○1  ✕0
+    ⓘ╭ Spawn worktree ──────────────╮▾
+    p│                              │+
+    ┃│ NAME                         │
+    ┃│                              │
+     │ EDITOR                       │
+     │ …umber' -c 'NvimTreeOpen' .█ │
+     │ AGENT                        │
+     │ claude                       │
+     │ MODE                         │
+     │ default                      │
      ╰──────────────────────────────╯
     ╭ Activity │ Git ────────────────╮
     │         No activity yet        │
@@ -1930,13 +2001,14 @@ fn snapshot_spawn_modal_tail_fits_long_task_name() {
     for c in "refactor-the-entire-authentication-pipeline".chars() {
         state.spawn_input_push_char(c);
     }
-    let output = render_to_string(&mut state, 34, 18);
-    insta::assert_snapshot!(output, @r"
+    let output = render_to_string(&mut state, 34, 22);
+    insta::assert_snapshot!(output, @"
      ≡1  ●0  ◎0  ◐0  ○1  ✕0
     ⓘ╭ Spawn worktree ──────────────╮▾
     p│                              │+
     ┃│ NAME                         │
     ┃│ …re-authentication-pipeline█ │
+     │ EDITOR                       │
      │ AGENT                        │
      │ claude                       │
      │ MODE                         │
@@ -1956,12 +2028,13 @@ fn snapshot_spawn_modal_narrow_width_still_fits() {
     for c in "hi".chars() {
         state.spawn_input_push_char(c);
     }
-    let output = render_to_string(&mut state, 18, 18);
-    insta::assert_snapshot!(output, @r"
+    let output = render_to_string(&mut state, 18, 22);
+    insta::assert_snapshot!(output, @"
      ≡1  ●0  ◎0  ◐0  ○
     ╭ Spawn worktree ╮
     │ NAME           │
     │ hi█            │
+    │ EDITOR         │
     │ AGENT          │
     │ claude         │
     │ MODE           │
@@ -1978,19 +2051,19 @@ fn snapshot_spawn_modal_compact_layout_in_short_agent_area() {
     let pane = make_pane(AgentType::Claude, PaneStatus::Idle);
     let mut state = make_state_for_popup_tests(vec![repo_group_with_root("proj", vec![pane])]);
     // Default bottom_panel_height is 3 in `make_state_for_popup_tests`.
-    // A 14-row terminal leaves 11 rows for the agents panel — below
-    // SPAWN_MODAL_EXPANDED_MIN_HEIGHT (12), so the popup must fall
+    // A 14-row terminal leaves 10 rows for the agents panel — below
+    // SPAWN_MODAL_EXPANDED_MIN_HEIGHT (16), so the popup must fall
     // back to the label-less compact layout.
     state.open_spawn_input_for_repo("proj".into(), "/home/u/proj".into(), None);
     for c in "hi".chars() {
         state.spawn_input_push_char(c);
     }
     let output = render_to_string(&mut state, 40, 14);
-    insta::assert_snapshot!(output, @r"
+    insta::assert_snapshot!(output, @"
      ≡1  ●0  ◎0  ◐0  ○1  ✕0
-    ⓘ                                    — ▾
-    proj╭ Spawn worktree ──────────────╮   +
-    ┃ ○ │ hi█                          │
+    ⓘ   ╭ Spawn worktree ──────────────╮ — ▾
+    proj│ hi█                          │   +
+    ┃ ○ │                              │
     ┃   │ claude                       │
         │ default                      │
         ╰──────────────────────────────╯
@@ -2001,23 +2074,411 @@ fn snapshot_spawn_modal_compact_layout_in_short_agent_area() {
 }
 
 #[test]
+fn snapshot_spawn_modal_inline_error_survives_the_layout_threshold() {
+    // Regression: `SPAWN_MODAL_EXPANDED_MIN_HEIGHT` used to budget only
+    // for the error-FREE popup height. At exactly that height the
+    // expanded layout was chosen, the popup was then clamped one row
+    // short, and `render_at`'s bounds check silently dropped the error
+    // row — pressing Enter on an empty name did nothing and said
+    // nothing. A 19-row terminal (3 bottom panel + 1 divider) is the
+    // height that used to break.
+    let pane = make_pane(AgentType::Claude, PaneStatus::Idle);
+    let mut state = make_state_for_popup_tests(vec![repo_group_with_root("proj", vec![pane])]);
+    state.open_spawn_input_for_repo("proj".into(), "/home/u/proj".into(), None);
+    state.confirm_spawn_input();
+    let output = render_to_string(&mut state, 34, 19);
+    insta::assert_snapshot!(output, @"
+     ≡1  ●0  ◎0  ◐0  ○1  ✕0
+    ⓘ                              — ▾
+    proj                             +
+    ┃╭ Spawn worktree ──────────────╮
+    ┃│ █                            │
+     │ claude                       │
+     │ default                      │
+     │ name is empty                │
+     ╰──────────────────────────────╯
+    ╭ Activity │ Git ────────────────╮
+    │         No activity yet        │
+    ╰────────────────────────────────╯
+    ");
+}
+
+#[test]
+fn snapshot_spawn_modal_inline_error_fits_at_the_expanded_threshold() {
+    // The companion to the test above, one row taller: at exactly
+    // `SPAWN_MODAL_EXPANDED_MIN_HEIGHT` the expanded layout IS chosen,
+    // and the error row must fit inside it rather than be clamped off.
+    let pane = make_pane(AgentType::Claude, PaneStatus::Idle);
+    let mut state = make_state_for_popup_tests(vec![repo_group_with_root("proj", vec![pane])]);
+    state.open_spawn_input_for_repo("proj".into(), "/home/u/proj".into(), None);
+    state.confirm_spawn_input();
+    let output = render_to_string(&mut state, 34, 20);
+    insta::assert_snapshot!(output, @"
+     ╭ Spawn worktree ──────────────╮
+    ⓘ│                              │▾
+    p│ NAME                         │+
+    ┃│ █                            │
+    ┃│                              │
+     │ EDITOR                       │
+     │ AGENT                        │
+     │ claude                       │
+     │ MODE                         │
+     │ default                      │
+     │ name is empty                │
+     ╰──────────────────────────────╯
+    ╭ Activity │ Git ────────────────╮
+    │         No activity yet        │
+    ╰────────────────────────────────╯
+    ");
+}
+
+#[test]
 fn snapshot_spawn_modal_compact_layout_shows_inline_error() {
     let pane = make_pane(AgentType::Claude, PaneStatus::Idle);
     let mut state = make_state_for_popup_tests(vec![repo_group_with_root("proj", vec![pane])]);
     state.open_spawn_input_for_repo("proj".into(), "/home/u/proj".into(), None);
     state.confirm_spawn_input();
     let output = render_to_string(&mut state, 40, 14);
-    insta::assert_snapshot!(output, @r"
+    insta::assert_snapshot!(output, @"
      ≡1  ●0  ◎0  ◐0  ○1  ✕0
     ⓘ   ╭ Spawn worktree ──────────────╮ — ▾
     proj│ █                            │   +
-    ┃ ○ │ claude                       │
-    ┃   │ default                      │
+    ┃ ○ │                              │
+    ┃   │ claude                       │
+        │ default                      │
         │ name is empty                │
         ╰──────────────────────────────╯
     ╭ Activity │ Git ──────────────────────╮
     │            No activity yet           │
     ╰──────────────────────────────────────╯
+    ");
+}
+
+// ─── Open worktree popup snapshots ──────────────────────────────────
+
+fn wt_row(path: &str, branch: &str, in_use: bool) -> OpenWorktreeRow {
+    OpenWorktreeRow {
+        path: path.into(),
+        branch: branch.into(),
+        label: branch.into(),
+        in_use,
+    }
+}
+
+/// Open the modal directly at `step`. Bypasses
+/// `open_worktree_from_selection` so the tests never shell out to git,
+/// and never reach `worktree::open` (which would create a real tmux
+/// window on the developer's server).
+fn open_worktree_popup(
+    state: &mut tmux_agent_sidebar::state::AppState,
+    rows: Vec<OpenWorktreeRow>,
+    step: OpenStep,
+) {
+    state.popup = PopupState::OpenWorktree {
+        target_repo_root: "/home/u/proj".into(),
+        rows,
+        selected: 0,
+        scroll: 0,
+        step,
+        editor: String::new(),
+        pick: AgentPick::default(),
+        field: OpenField::default(),
+        anchor_y: None,
+        error: None,
+        area: None,
+    };
+}
+
+fn open_worktree_rows() -> Vec<OpenWorktreeRow> {
+    vec![
+        wt_row("/home/u/proj", "main", false),
+        wt_row("/home/u/proj/.worktrees/login", "agent/login-fix", false),
+        wt_row("/home/u/proj/.worktrees/db", "agent/refactor-db", false),
+    ]
+}
+
+#[test]
+fn snapshot_open_worktree_picker_default_state() {
+    let pane = make_pane(AgentType::Claude, PaneStatus::Idle);
+    let mut state = make_state_for_popup_tests(vec![repo_group_with_root("proj", vec![pane])]);
+    open_worktree_popup(&mut state, open_worktree_rows(), OpenStep::Pick);
+    let output = render_to_string(&mut state, 34, 18);
+    insta::assert_snapshot!(output, @r"
+     ≡1  ●0  ◎0  ◐0  ○1  ✕0
+    ⓘ                              — ▾
+    proj                             +
+    ┃ ○ claude
+    ┃╭ Open worktree ───────────────╮
+     │   main                       │
+     │   agent/login-fix            │
+     │   agent/refactor-db          │
+     ╰──────────────────────────────╯
+    ╭ Activity │ Git ────────────────╮
+    │         No activity yet        │
+    ╰────────────────────────────────╯
+    ");
+}
+
+#[test]
+fn snapshot_open_worktree_picker_marks_in_use_worktree() {
+    let pane = make_pane(AgentType::Claude, PaneStatus::Idle);
+    let mut state = make_state_for_popup_tests(vec![repo_group_with_root("proj", vec![pane])]);
+    let mut rows = open_worktree_rows();
+    rows[1].in_use = true;
+    open_worktree_popup(&mut state, rows, OpenStep::Pick);
+    let output = render_to_string(&mut state, 34, 18);
+    insta::assert_snapshot!(output, @r"
+     ≡1  ●0  ◎0  ◐0  ○1  ✕0
+    ⓘ                              — ▾
+    proj                             +
+    ┃ ○ claude
+    ┃╭ Open worktree ───────────────╮
+     │   main                       │
+     │ ● agent/login-fix            │
+     │   agent/refactor-db          │
+     ╰──────────────────────────────╯
+    ╭ Activity │ Git ────────────────╮
+    │         No activity yet        │
+    ╰────────────────────────────────╯
+    ");
+}
+
+#[test]
+fn snapshot_open_worktree_picker_anchors_below_repo_header() {
+    let pane = make_pane(AgentType::Claude, PaneStatus::Idle);
+    let mut state = make_state_for_popup_tests(vec![repo_group_with_root("proj", vec![pane])]);
+    open_worktree_popup(&mut state, open_worktree_rows(), OpenStep::Pick);
+    // Row 2 is the repo header, the same anchor the spawn modal uses.
+    if let PopupState::OpenWorktree { anchor_y, .. } = &mut state.popup {
+        *anchor_y = Some(2);
+    }
+    let output = render_to_string(&mut state, 34, 18);
+    insta::assert_snapshot!(output, @r"
+     ≡1  ●0  ◎0  ◐0  ○1  ✕0
+    ⓘ                              — ▾
+    proj                             +
+    ╭ Open worktree ───────────────╮
+    │   main                       │
+    │   agent/login-fix            │
+    │   agent/refactor-db          │
+    ╰──────────────────────────────╯
+    ╭ Activity │ Git ────────────────╮
+    │         No activity yet        │
+    ╰────────────────────────────────╯
+    ");
+}
+
+#[test]
+fn snapshot_open_worktree_picker_scrolls_past_visible_height() {
+    let pane = make_pane(AgentType::Claude, PaneStatus::Idle);
+    let mut state = make_state_for_popup_tests(vec![repo_group_with_root("proj", vec![pane])]);
+    let rows: Vec<_> = (0..8)
+        .map(|i| {
+            wt_row(
+                &format!("/home/u/proj/.worktrees/w{i}"),
+                &format!("agent/task-{i}"),
+                false,
+            )
+        })
+        .collect();
+    open_worktree_popup(&mut state, rows, OpenStep::Pick);
+    // First render establishes the popup area, which is what the state
+    // layer reads to size its scroll window.
+    let _ = render_to_string(&mut state, 34, 10);
+    for _ in 0..5 {
+        state.open_worktree_move(1);
+    }
+    let output = render_to_string(&mut state, 34, 10);
+    insta::assert_snapshot!(output, @r"
+     ╭ Open worktree ───────────────╮
+    ⓘ│   agent/task-2               │▾
+    p│   agent/task-3               │+
+    ┃│   agent/task-4               │
+    ┃│   agent/task-5               │
+     ╰──────────────────────────────╯
+    ╭ Activity │ Git ────────────────╮
+    │         No activity yet        │
+    ╰────────────────────────────────╯
+    ");
+}
+
+#[test]
+fn snapshot_open_worktree_picker_narrow_width_still_fits() {
+    let pane = make_pane(AgentType::Claude, PaneStatus::Idle);
+    let mut state = make_state_for_popup_tests(vec![repo_group_with_root("proj", vec![pane])]);
+    open_worktree_popup(&mut state, open_worktree_rows(), OpenStep::Pick);
+    let output = render_to_string(&mut state, 18, 18);
+    insta::assert_snapshot!(output, @r"
+     ≡1  ●0  ◎0  ◐0  ○
+    ⓘ              — ▾
+    proj             +
+    ┃ ○ claude
+    ╭ Open worktree ─╮
+    │   main         │
+    │   agent/login-…│
+    │   agent/refact…│
+    ╰────────────────╯
+    ╭ Activity │ Git ╮
+    │ No activity yet│
+    ╰────────────────╯
+    ");
+}
+
+#[test]
+fn snapshot_open_worktree_configure_step_expanded() {
+    let pane = make_pane(AgentType::Claude, PaneStatus::Idle);
+    let mut state = make_state_for_popup_tests(vec![repo_group_with_root("proj", vec![pane])]);
+    open_worktree_popup(&mut state, open_worktree_rows(), OpenStep::Pick);
+    state.open_worktree_move(1);
+    // Enter on the picker advances to the configure step, carrying the
+    // picked branch into the read-only BRANCH row.
+    state.confirm_open_worktree();
+    let output = render_to_string(&mut state, 34, 22);
+    insta::assert_snapshot!(output, @"
+     ≡1  ●0  ◎0  ◐0  ○1  ✕0
+    ⓘ╭ Open worktree ───────────────╮▾
+    p│                              │+
+    ┃│ BRANCH                       │
+    ┃│ agent/login-fix              │
+     │ EDITOR                       │
+     │ █                            │
+     │ AGENT                        │
+     │ claude                       │
+     │ MODE                         │
+     │ default                      │
+     ╰──────────────────────────────╯
+    ╭ Activity │ Git ────────────────╮
+    │         No activity yet        │
+    ╰────────────────────────────────╯
+    ");
+}
+
+#[test]
+fn snapshot_open_worktree_configure_step_cycles_agent_and_mode() {
+    let pane = make_pane(AgentType::Claude, PaneStatus::Idle);
+    let mut state = make_state_for_popup_tests(vec![repo_group_with_root("proj", vec![pane])]);
+    open_worktree_popup(&mut state, open_worktree_rows(), OpenStep::Configure);
+    state.open_worktree_next_field(); // EDITOR → AGENT
+    state.open_worktree_cycle(1); // claude → codex
+    state.open_worktree_next_field();
+    state.open_worktree_cycle(2); // default → bypassPermissions
+    let output = render_to_string(&mut state, 34, 22);
+    insta::assert_snapshot!(output, @"
+     ≡1  ●0  ◎0  ◐0  ○1  ✕0
+    ⓘ╭ Open worktree ───────────────╮▾
+    p│                              │+
+    ┃│ BRANCH                       │
+    ┃│ main                         │
+     │ EDITOR                       │
+     │ AGENT                        │
+     │ codex                        │
+     │ MODE                         │
+     │ bypassPermissions            │
+     ╰──────────────────────────────╯
+    ╭ Activity │ Git ────────────────╮
+    │         No activity yet        │
+    ╰────────────────────────────────╯
+    ");
+}
+
+#[test]
+fn snapshot_open_worktree_configure_step_editor_field_focused() {
+    // EDITOR is the topmost field and takes focus as soon as step 2
+    // opens, so it starts with the cursor and receives the typed text.
+    let pane = make_pane(AgentType::Claude, PaneStatus::Idle);
+    let mut state = make_state_for_popup_tests(vec![repo_group_with_root("proj", vec![pane])]);
+    open_worktree_popup(&mut state, open_worktree_rows(), OpenStep::Configure);
+    for c in "nvim".chars() {
+        state.open_worktree_push_char(c);
+    }
+    let output = render_to_string(&mut state, 34, 22);
+    insta::assert_snapshot!(output, @"
+     ≡1  ●0  ◎0  ◐0  ○1  ✕0
+    ⓘ╭ Open worktree ───────────────╮▾
+    p│                              │+
+    ┃│ BRANCH                       │
+    ┃│ main                         │
+     │ EDITOR                       │
+     │ nvim█                        │
+     │ AGENT                        │
+     │ claude                       │
+     │ MODE                         │
+     │ default                      │
+     ╰──────────────────────────────╯
+    ╭ Activity │ Git ────────────────╮
+    │         No activity yet        │
+    ╰────────────────────────────────╯
+    ");
+}
+
+#[test]
+fn snapshot_open_worktree_configure_step_compact_layout() {
+    let pane = make_pane(AgentType::Claude, PaneStatus::Idle);
+    let mut state = make_state_for_popup_tests(vec![repo_group_with_root("proj", vec![pane])]);
+    // 14 rows minus the 3-row bottom panel leaves 11 for the agents
+    // panel — below SPAWN_MODAL_EXPANDED_MIN_HEIGHT, so the modal falls
+    // back to the label-less compact layout.
+    open_worktree_popup(&mut state, open_worktree_rows(), OpenStep::Configure);
+    let output = render_to_string(&mut state, 40, 14);
+    insta::assert_snapshot!(output, @"
+     ≡1  ●0  ◎0  ◐0  ○1  ✕0
+    ⓘ   ╭ Open worktree ───────────────╮ — ▾
+    proj│ main                         │   +
+    ┃ ○ │ █                            │
+    ┃   │ claude                       │
+        │ default                      │
+        ╰──────────────────────────────╯
+    ╭ Activity │ Git ──────────────────────╮
+    │            No activity yet           │
+    ╰──────────────────────────────────────╯
+    ");
+}
+
+#[test]
+fn snapshot_open_worktree_configure_step_shows_inline_error() {
+    let pane = make_pane(AgentType::Claude, PaneStatus::Idle);
+    let mut state = make_state_for_popup_tests(vec![repo_group_with_root("proj", vec![pane])]);
+    open_worktree_popup(&mut state, open_worktree_rows(), OpenStep::Configure);
+    if let PopupState::OpenWorktree { error, .. } = &mut state.popup {
+        *error = Some("tmux: failed to set @agent-sidebar-opened".into());
+    }
+    let output = render_to_string(&mut state, 40, 14);
+    insta::assert_snapshot!(output, @"
+     ≡1  ●0  ◎0  ◐0  ○1  ✕0
+    ⓘ   ╭ Open worktree ───────────────╮ — ▾
+    proj│ main                         │   +
+    ┃ ○ │ █                            │
+    ┃   │ claude                       │
+        │ default                      │
+        │ tmux: failed to set @agent-… │
+        ╰──────────────────────────────╯
+    ╭ Activity │ Git ──────────────────────╮
+    │            No activity yet           │
+    ╰──────────────────────────────────────╯
+    ");
+}
+
+#[test]
+fn snapshot_open_worktree_configure_step_narrow_width_still_fits() {
+    let pane = make_pane(AgentType::Claude, PaneStatus::Idle);
+    let mut state = make_state_for_popup_tests(vec![repo_group_with_root("proj", vec![pane])]);
+    open_worktree_popup(&mut state, open_worktree_rows(), OpenStep::Configure);
+    let output = render_to_string(&mut state, 18, 22);
+    insta::assert_snapshot!(output, @"
+     ≡1  ●0  ◎0  ◐0  ○
+    ╭ Open worktree ─╮
+    │ BRANCH         │
+    │ main           │
+    │ EDITOR         │
+    │ █              │
+    │ AGENT          │
+    │ claude         │
+    │ MODE           │
+    │ default        │
+    ╰────────────────╯
+    ╭ Activity │ Git ╮
+    │ No activity yet│
+    ╰────────────────╯
     ");
 }
 
@@ -2259,6 +2720,7 @@ fn snapshot_remove_confirm_modal_shows_three_options() {
     state.popup = PopupState::RemoveConfirm {
         pane_id: "%42".into(),
         branch: "add-login".into(),
+        dirty: false,
         error: None,
         area: None,
     };
@@ -2280,6 +2742,73 @@ fn snapshot_remove_confirm_modal_shows_three_options() {
 }
 
 #[test]
+fn snapshot_remove_confirm_modal_blocks_removal_on_a_dirty_worktree() {
+    // `[y]` runs `git worktree remove --force`. When the worktree holds
+    // uncommitted work the modal must say so *in the terminal* — the
+    // website's caution block is not something the user sees at `x`
+    // time — and the destructive row must stop looking available.
+    let pane = make_pane(AgentType::Claude, PaneStatus::Idle);
+    let mut state = make_state_for_popup_tests(vec![repo_group_with_root("proj", vec![pane])]);
+    state.popup = PopupState::RemoveConfirm {
+        pane_id: "%42".into(),
+        branch: "feature/JIRA-4821".into(),
+        dirty: true,
+        error: None,
+        area: None,
+    };
+    let output = render_to_string(&mut state, 50, 18);
+    insta::assert_snapshot!(output, @r"
+     ≡1  ●0  ◎0  ◐0  ○1  ✕0
+    ⓘ                                              — ▾
+    proj                                             +
+    ┃ ○ claude ╭ feature/JIRA-4821 ───────╮
+    ┃   main   │! uncommitted changes     │
+        Waiting│[y] remove — blocked      │
+               │[c] close window only     │
+               │[n] cancel                │
+               ╰──────────────────────────╯
+    ╭ Activity │ Git ────────────────────────────────╮
+    │                 No activity yet                │
+    ╰────────────────────────────────────────────────╯
+    ");
+}
+
+#[test]
+fn snapshot_remove_confirm_modal_dirty_refusal_shows_inline_reason() {
+    // Pressing `y` anyway must explain itself rather than doing nothing.
+    let pane = make_pane(AgentType::Claude, PaneStatus::Idle);
+    let mut state = make_state_for_popup_tests(vec![repo_group_with_root("proj", vec![pane])]);
+    state.popup = PopupState::RemoveConfirm {
+        pane_id: "%42".into(),
+        branch: "add-login".into(),
+        dirty: true,
+        error: None,
+        area: None,
+    };
+    state.confirm_remove(tmux_agent_sidebar::worktree::RemoveMode::WindowAndWorktree);
+    assert!(
+        state.is_remove_confirm_open(),
+        "the popup must stay open so [c] is still reachable"
+    );
+    let output = render_to_string(&mut state, 50, 18);
+    insta::assert_snapshot!(output, @r"
+     ≡1  ●0  ◎0  ◐0  ○1  ✕0
+    ⓘ                                              — ▾
+    proj                                             +
+    ┃ ○ claude ╭ add-login ───────────────╮
+    ┃   main   │! uncommitted changes     │
+        Waiting│[y] remove — blocked      │
+               │[c] close window only     │
+               │[n] cancel                │
+               │commit or stash first     │
+               ╰──────────────────────────╯
+    ╭ Activity │ Git ────────────────────────────────╮
+    │                 No activity yet                │
+    ╰────────────────────────────────────────────────╯
+    ");
+}
+
+#[test]
 fn snapshot_spawn_modal_shows_inline_error_when_task_empty() {
     let pane = make_pane(AgentType::Claude, PaneStatus::Idle);
     let mut state = make_state_for_popup_tests(vec![repo_group_with_root("proj", vec![pane])]);
@@ -2288,13 +2817,14 @@ fn snapshot_spawn_modal_shows_inline_error_when_task_empty() {
     // NOT close the popup.
     state.confirm_spawn_input();
     assert!(state.is_spawn_input_open(), "popup must stay open on error");
-    let output = render_to_string(&mut state, 34, 18);
+    let output = render_to_string(&mut state, 34, 22);
     insta::assert_snapshot!(output, @"
-     ╭ Spawn worktree ──────────────╮
-    ⓘ│                              │▾
-    p│ NAME                         │+
+     ≡1  ●0  ◎0  ◐0  ○1  ✕0
+    ⓘ╭ Spawn worktree ──────────────╮▾
+    p│                              │+
+    ┃│ NAME                         │
     ┃│ █                            │
-    ┃│                              │
+     │ EDITOR                       │
      │ AGENT                        │
      │ claude                       │
      │ MODE                         │
@@ -2331,6 +2861,7 @@ fn snapshot_remove_confirm_modal_shows_inline_error() {
     state.popup = PopupState::RemoveConfirm {
         pane_id: "%42".into(),
         branch: "add-login".into(),
+        dirty: false,
         error: Some("git: worktree has uncommitted changes".into()),
         area: None,
     };

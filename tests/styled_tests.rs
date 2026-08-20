@@ -394,6 +394,65 @@ fn snapshot_custom_theme_colors() {
     ");
 }
 
+// The open-worktree picker marks its selection with a background
+// colour only, so a plain-text snapshot cannot tell row 0 from row 1.
+// This locks in that moving the selection moves the highlighted row.
+#[test]
+fn snapshot_open_worktree_picker_selection_styled() {
+    use tmux_agent_sidebar::state::{AgentPick, OpenField, OpenStep, OpenWorktreeRow, PopupState};
+
+    let pane = make_pane(AgentType::Claude, PaneStatus::Idle);
+    let mut state = make_state(vec![SessionInfo {
+        session_name: "main".into(),
+        windows: vec![WindowInfo {
+            window_id: "@1".into(),
+            window_name: "project".into(),
+            window_active: true,
+            auto_rename: false,
+            panes: vec![pane.clone()],
+        }],
+    }]);
+    state.repo_groups = vec![make_repo_group("project", vec![pane])];
+    state.rebuild_row_targets();
+    state.bottom_panel_height = 0;
+    state.popup = PopupState::OpenWorktree {
+        target_repo_root: "/p".into(),
+        rows: vec![
+            OpenWorktreeRow {
+                path: "/p".into(),
+                branch: "main".into(),
+                label: "main".into(),
+                in_use: false,
+            },
+            OpenWorktreeRow {
+                path: "/p/.wt/a".into(),
+                branch: "agent/a".into(),
+                label: "agent/a".into(),
+                in_use: true,
+            },
+        ],
+        selected: 0,
+        scroll: 0,
+        step: OpenStep::Pick,
+        editor: String::new(),
+        pick: AgentPick::default(),
+        field: OpenField::default(),
+        anchor_y: None,
+        error: None,
+        area: None,
+    };
+    state.open_worktree_move(1);
+
+    insta::assert_snapshot!(render_to_styled_string(&mut state, 20, 8), @r"
+     ≡[fg:111]1[fg:255]  ●[fg:245]0[fg:245]  ◎[fg:245]0[fg:245]  ◐[fg:245]0[fg:245]  ○[fg:245]1[fg:255]
+    ⓘ[fg:221]                —[fg:252] ▾[fg:252]
+    ╭[fg:153] [fg:153,bold]O[fg:153,bold]p[fg:153,bold]e[fg:153,bold]n[fg:153,bold] [fg:153,bold]w[fg:153,bold]o[fg:153,bold]r[fg:153,bold]k[fg:153,bold]t[fg:153,bold]r[fg:153,bold]e[fg:153,bold]e[fg:153,bold] [fg:153,bold]─[fg:153]─[fg:153]─[fg:153]╮[fg:153]
+    │[fg:153] [fg:252] [fg:252] [fg:252]m[fg:252]a[fg:252]i[fg:252]n[fg:252] [fg:252] [fg:252] [fg:252] [fg:252] [fg:252] [fg:252] [fg:252] [fg:252] [fg:252] [fg:252] [fg:252]│[fg:153]
+    │[fg:153] [fg:255,bg:239]●[fg:255,bg:239] [fg:255,bg:239]a[fg:255,bg:239]g[fg:255,bg:239]e[fg:255,bg:239]n[fg:255,bg:239]t[fg:255,bg:239]/[fg:255,bg:239]a[fg:255,bg:239] [fg:255,bg:239] [fg:255,bg:239] [fg:255,bg:239] [fg:255,bg:239] [fg:255,bg:239] [fg:255,bg:239] [fg:255,bg:239] [fg:255,bg:239]│[fg:153]
+    ╰[fg:153]─[fg:153]─[fg:153]─[fg:153]─[fg:153]─[fg:153]─[fg:153]─[fg:153]─[fg:153]─[fg:153]─[fg:153]─[fg:153]─[fg:153]─[fg:153]─[fg:153]─[fg:153]─[fg:153]─[fg:153]─[fg:153]╯[fg:153]
+    ");
+}
+
 #[test]
 fn test_theme_default_matches_shell_colors() {
     use ratatui::style::Color;

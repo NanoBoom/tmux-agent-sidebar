@@ -1,6 +1,6 @@
 ---
 title: Worktrees
-description: Spawn and remove git worktrees — with their agent — from inside the sidebar.
+description: Spawn, open, and remove git worktrees — with their agent — from inside the sidebar.
 ---
 
 import { Image } from 'astro:assets';
@@ -10,6 +10,8 @@ import spawn from '../../../assets/captures/worktree-spawn.png';
 
 The sidebar can create a git worktree, open a new tmux window, and launch an agent in it — all from one keystroke. Closing lets you pick the scope: tear down the window, worktree, and branch together, or keep the worktree/branch on disk and only close the window.
 
+Already have the worktree? `o` opens the same "new window + agent" flow against a worktree that already exists, without creating any git state.
+
 ## Spawn modal
 
 Opened with `n` or by clicking the `+` button next to a repo header.
@@ -17,7 +19,7 @@ Opened with `n` or by clicking the `+` button next to a repo header.
 | Key                                | Action                                                                                           |
 | ---------------------------------- | ------------------------------------------------------------------------------------------------ |
 | Text keys                          | Type the name. The slugified form (`add login form` → `add-login-form`) becomes both the tmux window name and the branch suffix (branch: `agent/add-login-form`). See "What gets created" below. |
-| `↑` / `↓` / `Tab` / `Shift+Tab`    | Move focus between `NAME` / `AGENT` / `MODE` fields                                              |
+| `↑` / `↓` / `Tab` / `Shift+Tab`    | Move focus between `NAME` / `EDITOR` / `AGENT` / `MODE` fields                                   |
 | `←` / `→`                          | Cycle the value when the agent or mode field has focus                                           |
 | `Enter`                            | Create the worktree + window and launch the agent                                                |
 | `Esc` / click outside              | Cancel                                                                                           |
@@ -30,17 +32,140 @@ The modal's `NAME` field is slugified (lowercase, non-alphanumeric → `-`) and 
 - **Worktree path** — `<repo>/.worktrees/<slug>` by default. Change the repo-relative directory with `@agent-sidebar-worktree-dir`; absolute paths and `..` are rejected.
 - **tmux window** — the slug is used as the window name; the agent you picked in the modal (`claude` / `codex` / `opencode`) launches inside it with the selected permission `MODE`.
 
-Defaults for the agent, branch prefix, and worktree directory live in tmux options — see [tmux options](/tmux-agent-sidebar/reference/tmux-options/) for the full list.
+Defaults for the agent, branch prefix, worktree directory, and editor live in tmux options — see [tmux options](/tmux-agent-sidebar/reference/tmux-options/) for the full list.
+
+### Editor pane
+
+The `EDITOR` field, directly above `AGENT`, is free text pre-filled from
+`@sidebar_editor`:
+
+```tmux
+set -g @sidebar_editor 'nvim'
+```
+
+Leave it empty (the default) and the new window keeps a single pane
+running the agent, exactly as before. Fill it in — in the config or just
+for this one spawn — and the window is split instead:
+
+```
+┌───────────────┬───────────────┐
+│               │               │
+│    nvim       │    claude     │
+│   (editor)    │    (agent)    │
+│               │               │
+└───────────────┴───────────────┘
+```
+
+The value is sent to the left pane's shell verbatim, so flags and
+arguments work (`nvim -c 'NvimTreeOpen' .`). Both panes start in the
+worktree directory, and the sidebar's markers are set at window scope
+before the split, so `x` still closes the whole thing from either side.
+
+If the split fails, the entire spawn is rolled back — a window holding
+an editor but no agent is worse than no window at all.
+
+## Open worktree modal
+
+Opened with `o` on a pane. It lists every existing worktree of that
+pane's repository — including the main checkout — and launches an agent
+in the one you pick. Bare worktrees and prunable / missing ones are
+filtered out, since `tmux new-window` in them would fail.
+
+### Step 1 — pick the worktree
+
+| Key                                          | Action                   |
+| -------------------------------------------- | ------------------------ |
+| `j` / `k` / `↑` / `↓` / `Ctrl+n` / `Ctrl+p`  | Move selection           |
+| `Enter`                                       | Confirm, go to step 2    |
+| `Esc` / click outside                         | Cancel                   |
+
+A `●` before a row means a pane is already running in that worktree.
+It is informational only — `Enter` still opens a new window.
+
+### Step 2 — pick the agent and mode
+
+| Key                              | Action                                             |
+| -------------------------------- | -------------------------------------------------- |
+| `↑` / `↓` / `Tab` / `Shift+Tab`  | Move focus between `EDITOR` / `AGENT` / `MODE`     |
+| `←` / `→`                        | Cycle the focused value (agent and mode only)      |
+| Text keys                        | Edit the command when `EDITOR` has focus           |
+| `Enter`                          | Open the window in that worktree and launch        |
+| `Esc`                            | Back to step 1                                     |
+
+`BRANCH` is read-only — it echoes what you picked in step 1. `EDITOR`
+works exactly as in the spawn modal above, including the split-pane
+layout, and takes focus as soon as step 2 opens. That means `j` / `k`
+type here instead of navigating; use `Tab`, the arrows or `Ctrl+n` /
+`Ctrl+p` to move focus. Step 1's list is unaffected — it has no text
+field, so `j` / `k` still move the selection there.
+
+### Closing it again
+
+Opened windows carry the same `@agent-sidebar-spawned` marker set as
+spawned ones, so `x` (and the `×` click marker) behave identically —
+including `[y]`, which runs `git worktree remove --force` and
+`git branch -D`.
+
+:::caution
+`[y]` on an opened worktree deletes a worktree and branch **you**
+created, not one the sidebar made. `-D` deletes the branch even when it
+has not been merged. Use `[c]` to just close the window. Recover a
+deleted branch via `git reflog`.
+:::
+
+Uncommitted work is protected: see
+[Uncommitted changes block `[y]`](#uncommitted-changes-block-y) below.
+
+Windows opened this way also set `@agent-sidebar-opened=1`. Only
+`remove_with` reads it, to tell a legitimately branchless detached
+checkout from a corrupt marker set — an `o`-opened worktree on a
+detached HEAD has no branch to record, while a *spawned* window without
+one can only be broken. It also means `tmux show-options -w` still tells
+you the git state predates the sidebar.
+
+Removing the *main* worktree is refused by git itself (`fatal: '…' is a
+main working tree`); the error surfaces in the modal and nothing is
+deleted.
 
 ## Close pane modal
 
-Opened with `x` on a spawn-created pane, or by clicking the `×` button next to the branch name.
+Opened with `x` on a sidebar-created pane (spawned with `n` or opened with `o`), or by clicking the `×` button next to the branch name.
 
 | Key             | Action                                                                                                                                 |
 | --------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `y` / `Enter`   | Close the tmux window, remove the git worktree (`--force`), **and** delete the branch the spawn created (`git branch -D`)             |
+| `y` / `Enter`   | Close the tmux window, remove the git worktree (`--force`), **and** delete its branch (`git branch -D`) — see the caution above for `o`-opened worktrees |
 | `c`             | Close the tmux window only, keep the worktree and branch on disk                                                                       |
 | `n` / `Esc`     | Cancel                                                                                                                                 |
+
+### Uncommitted changes block `[y]`
+
+`git worktree remove --force` throws away staged, unstaged and untracked
+work without asking, and `x` → `Enter` is a two-keystroke path straight
+out of the `o` flow. So when the worktree is dirty the modal says so and
+takes the option away:
+
+```
+╭ feature/JIRA-4821 ───────╮
+│! uncommitted changes     │
+│[y] remove — blocked      │
+│[c] close window only     │
+│[n] cancel                │
+╰──────────────────────────╯
+```
+
+Pressing `y` (or `Enter`) anyway answers `commit or stash first` inside
+the modal and changes nothing. `[c]` is unaffected — it touches no git,
+so it stays the way to get the window off your screen while you decide.
+
+"Dirty" is `git status --porcelain` being non-empty, so ignored files
+(build artifacts, `node_modules`) do not count. The check runs when the
+modal opens **and** again inside the remove flow, so a worktree that a
+running agent dirties while the modal is up is still protected. A
+worktree directory that no longer exists reads as clean — there is
+nothing left to lose, and the close would otherwise be unrecoverable.
+
+This applies to spawned (`n`) and opened (`o`) worktrees alike: the
+sidebar deleting work it generated itself is no less lossy.
 
 ### Why `-D` and not `-d`?
 

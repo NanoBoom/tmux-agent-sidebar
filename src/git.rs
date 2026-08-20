@@ -349,13 +349,36 @@ pub fn worktree_add(repo: &str, worktree_path: &str, branch: &str) -> Result<(),
     run_git_capture(repo, &["worktree", "add", worktree_path, "-b", branch]).map(|_| ())
 }
 
-/// `git worktree remove --force <worktree_path>`. `--force` is used
-/// because the sidebar's remove flow only runs when the user explicitly
-/// picks "close window + remove worktree" — agent sessions routinely
-/// leave untracked state behind and git would otherwise strand the
-/// worktree. Users who want to keep the checkout have `w` (window only).
+/// `git worktree remove --force <worktree_path>`. `--force` covers the
+/// cases plain `remove` refuses for reasons the user cannot act on from
+/// the sidebar (a locked entry, a worktree git considers unclean for
+/// reasons `status --porcelain` does not report). It is *not* what
+/// handles uncommitted work: [`worktree_is_dirty`] gates this call, so
+/// the remove flow never reaches here with work to lose. Users who want
+/// to keep the checkout have `[c]` (window only).
 pub fn worktree_remove(repo: &str, worktree_path: &str) -> Result<(), String> {
     run_git_capture(repo, &["worktree", "remove", "--force", worktree_path]).map(|_| ())
+}
+
+/// `true` when the worktree at `worktree_path` has staged, unstaged or
+/// untracked changes — i.e. `git worktree remove --force` would throw
+/// work away. `--porcelain` already excludes ignored files, so build
+/// artifacts do not count.
+///
+/// A path that is empty or gone reads as clean: the remove flow skips
+/// `git worktree remove` there anyway, and blocking on a directory that
+/// no longer exists would strand the window. Any *other* git failure on
+/// an existing directory reads as **dirty** — an unverifiable worktree
+/// must not be force-removed, and `[c] close window only` is still
+/// available as the escape hatch.
+pub fn worktree_is_dirty(worktree_path: &str) -> bool {
+    if worktree_path.is_empty() || !std::path::Path::new(worktree_path).exists() {
+        return false;
+    }
+    // `run_git_capture` trims, so a clean tree comes back as "".
+    run_git_capture(worktree_path, &["status", "--porcelain"])
+        .map(|out| !out.is_empty())
+        .unwrap_or(true)
 }
 
 /// `git branch -D <branch>`. Used by the spawn rollback path to drop
@@ -364,6 +387,71 @@ pub fn worktree_remove(repo: &str, worktree_path: &str) -> Result<(), String> {
 /// would then collide with via `branch_exists`.
 pub fn branch_delete(repo: &str, branch: &str) -> Result<(), String> {
     run_git_capture(repo, &["branch", "-D", branch]).map(|_| ())
+}
+
+/// One entry of `git worktree list --porcelain`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorktreeEntry {
+    pub path: String,
+    /// Short branch name (`refs/heads/` stripped). Empty when detached.
+    pub branch: String,
+    pub head: String,
+    pub bare: bool,
+    pub detached: bool,
+    pub locked: bool,
+    pub prunable: bool,
+}
+
+/// `git worktree list --porcelain` from inside `repo`. Lists the main
+/// worktree plus every linked worktree of the repository.
+pub fn worktree_list(repo: &str) -> Result<Vec<WorktreeEntry>, String> {
+    run_git_capture(repo, &["worktree", "list", "--porcelain"]).map(|out| parse_worktree_list(&out))
+}
+
+/// Parse the porcelain worktree listing. Records are separated by blank
+/// lines and each line is `<key>` or `<key> <value>`; a `worktree` line
+/// always starts a new record. Split out as a pure function so it is
+/// unit-testable without a repo, same as [`parse_status_short`] /
+/// [`parse_diff_stat`].
+pub(crate) fn parse_worktree_list(text: &str) -> Vec<WorktreeEntry> {
+    let mut entries: Vec<WorktreeEntry> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim_end();
+        if line.is_empty() {
+            continue;
+        }
+        let (key, value) = match line.split_once(' ') {
+            Some((k, v)) => (k, v.trim()),
+            None => (line, ""),
+        };
+        if key == "worktree" {
+            entries.push(WorktreeEntry {
+                path: value.to_string(),
+                ..WorktreeEntry::default()
+            });
+            continue;
+        }
+        // Keys before the first `worktree` line are malformed input; drop
+        // them rather than inventing a pathless record.
+        let Some(entry) = entries.last_mut() else {
+            continue;
+        };
+        match key {
+            "HEAD" => entry.head = value.to_string(),
+            "branch" => {
+                entry.branch = value
+                    .strip_prefix("refs/heads/")
+                    .unwrap_or(value)
+                    .to_string()
+            }
+            "detached" => entry.detached = true,
+            "bare" => entry.bare = true,
+            "locked" => entry.locked = true,
+            "prunable" => entry.prunable = true,
+            _ => {}
+        }
+    }
+    entries
 }
 
 pub(crate) fn parse_diff_stat(text: &str) -> Option<(usize, usize)> {
@@ -464,6 +552,100 @@ mod tests {
     #[test]
     fn normalize_git_url_unknown_format() {
         assert_eq!(normalize_git_url("/local/path/repo"), "/local/path/repo");
+    }
+
+    // ─── parse_worktree_list tests ───────────────────────────────
+
+    #[test]
+    fn parse_worktree_list_main_plus_two_linked() {
+        let text = "\
+worktree /repo
+HEAD abc123
+branch refs/heads/main
+
+worktree /repo/.worktrees/login
+HEAD def456
+branch refs/heads/agent/login-fix
+
+worktree /repo/.worktrees/db
+HEAD 789abc
+branch refs/heads/agent/refactor-db
+";
+        let entries = parse_worktree_list(text);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].path, "/repo");
+        assert_eq!(entries[0].branch, "main");
+        assert_eq!(entries[0].head, "abc123");
+        assert_eq!(entries[1].path, "/repo/.worktrees/login");
+        assert_eq!(entries[1].branch, "agent/login-fix");
+        assert_eq!(entries[2].branch, "agent/refactor-db");
+        assert!(entries.iter().all(|e| !e.bare && !e.detached));
+    }
+
+    #[test]
+    fn parse_worktree_list_detached_has_no_branch() {
+        let text = "worktree /repo/.worktrees/spike\nHEAD deadbeefcafe\ndetached\n";
+        let entries = parse_worktree_list(text);
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].detached);
+        assert!(entries[0].branch.is_empty());
+        assert_eq!(entries[0].head, "deadbeefcafe");
+    }
+
+    #[test]
+    fn parse_worktree_list_bare_record() {
+        let text = "worktree /repo.git\nbare\n";
+        let entries = parse_worktree_list(text);
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].bare);
+        assert!(entries[0].head.is_empty());
+    }
+
+    #[test]
+    fn parse_worktree_list_locked_and_prunable_with_and_without_reason() {
+        let text = "\
+worktree /a
+HEAD 1
+branch refs/heads/a
+locked
+
+worktree /b
+HEAD 2
+branch refs/heads/b
+locked on removable media
+prunable gitdir file points to non-existent location
+
+worktree /c
+HEAD 3
+branch refs/heads/c
+prunable
+";
+        let entries = parse_worktree_list(text);
+        assert_eq!(entries.len(), 3);
+        assert!(entries[0].locked && !entries[0].prunable);
+        assert!(entries[1].locked && entries[1].prunable);
+        assert!(!entries[2].locked && entries[2].prunable);
+    }
+
+    #[test]
+    fn parse_worktree_list_branch_without_refs_heads_prefix_kept_verbatim() {
+        let text = "worktree /a\nHEAD 1\nbranch refs/remotes/origin/main\n";
+        let entries = parse_worktree_list(text);
+        assert_eq!(entries[0].branch, "refs/remotes/origin/main");
+    }
+
+    #[test]
+    fn parse_worktree_list_tolerates_empty_and_blank_runs() {
+        assert!(parse_worktree_list("").is_empty());
+        assert!(parse_worktree_list("\n\n\n").is_empty());
+        // Keys before the first `worktree` line have no record to attach
+        // to and must not create a pathless entry.
+        assert!(parse_worktree_list("HEAD abc\nbranch refs/heads/x\n").is_empty());
+
+        let entries = parse_worktree_list("\n\nworktree /a\n\n\n\nworktree /b\n\n");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].path, "/a");
+        assert_eq!(entries[1].path, "/b");
     }
 
     // ─── parse_status_short tests ────────────────────────────────
